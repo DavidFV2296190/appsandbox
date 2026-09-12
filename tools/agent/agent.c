@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include "p9copy.h"
+#include "gl_provision.h"
 #include "../transport/asb_transport.h"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -451,30 +452,17 @@ static BOOL deploy_ssh_key(const char *pubkey)
     return TRUE;
 }
 
-/* File size in bytes, or (ULONGLONG)-1 if the file is absent. */
-static ULONGLONG file_size_w(const wchar_t *path)
-{
-    WIN32_FILE_ATTRIBUTE_DATA fad;
-    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fad))
-        return (ULONGLONG)-1;
-    return ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
-}
-
-/* Provision the D3D mapping layers after the agent has copied them into `dir`
-   (C:\Windows\AppSandbox\d3dlayers) over Plan9. Runs as SYSTEM from the GPU copy
-   thread, AFTER the GPU driver copy. Deploys Mesa's standalone opengl32 trio +
-   dxil.dll into System32 and registers the OpenCL + Vulkan ICDs via their Khronos
-   registry keys. Idempotent + self-healing across boots. */
-static void gl_provision(const wchar_t *dir)
+static void gl_provision(const wchar_t *dir, const wchar_t *native_dir)
 {
     wchar_t path[MAX_PATH], sys[MAX_PATH], dst[MAX_PATH];
     HKEY key;
     DWORD zero = 0;
+    BOOL native_runtime = FALSE;
 
-    agent_log("GL: provisioning mapping layers from %ls", dir);
+    agent_log("GL: provisioning GPU runtimes from %ls", dir[0] ? dir : native_dir);
 
     /* dxil.dll -> System32 (OpenGLOn12 / vulkan_dzn load it by leaf name). */
-    if (GetSystemDirectoryW(sys, MAX_PATH)) {
+    if (dir[0] && GetSystemDirectoryW(sys, MAX_PATH)) {
         swprintf_s(path, MAX_PATH, L"%s\\dxil.dll", dir);
         swprintf_s(dst, MAX_PATH, L"%s\\dxil.dll", sys);
         if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
@@ -485,69 +473,47 @@ static void gl_provision(const wchar_t *dir)
         }
     }
 
-    /* OpenGL: deploy Mesa's standalone opengl32 trio into System32. */
     if (GetSystemDirectoryW(sys, MAX_PATH)) {
-        wchar_t srcdll[MAX_PATH], dstdll[MAX_PATH], bak[MAX_PATH], oldp[MAX_PATH];
-        wchar_t cmd[MAX_PATH * 2];
-
-        /* gallium_wgl.dll + z-1.dll: copied into System32 (opengl32 imports them). */
-        swprintf_s(srcdll, MAX_PATH, L"%s\\gallium_wgl.dll", dir);
-        swprintf_s(dstdll, MAX_PATH, L"%s\\gallium_wgl.dll", sys);
-        CopyFileW(srcdll, dstdll, FALSE);
-        swprintf_s(srcdll, MAX_PATH, L"%s\\z-1.dll", dir);
-        swprintf_s(dstdll, MAX_PATH, L"%s\\z-1.dll", sys);
-        CopyFileW(srcdll, dstdll, FALSE);
-
-        /* opengl32.dll is TrustedInstaller-owned and memory-mapped. Replace it
-           only when it isn't already our build (size differs) — self-heals if
-           Windows servicing/SFC restores Microsoft's. Back up the MS copy once,
-           take ownership + grant SYSTEM, rename the in-use file aside, copy ours. */
-        swprintf_s(srcdll, MAX_PATH, L"%s\\opengl32.dll", dir);
-        swprintf_s(dstdll, MAX_PATH, L"%s\\opengl32.dll", sys);
-        if (file_size_w(srcdll) != (ULONGLONG)-1 &&
-            file_size_w(srcdll) != file_size_w(dstdll)) {
-            swprintf_s(bak,  MAX_PATH, L"%s\\opengl32.dll.msbak", sys);
-            swprintf_s(oldp, MAX_PATH, L"%s\\opengl32.dll.old", sys);
-            if (file_size_w(bak) == (ULONGLONG)-1)
-                CopyFileW(dstdll, bak, TRUE);  /* back up pristine MS copy once */
-            swprintf_s(cmd, MAX_PATH * 2, L"%s\\takeown.exe /f \"%s\"", sys, dstdll);
-            run_quiet(cmd);
-            swprintf_s(cmd, MAX_PATH * 2, L"%s\\icacls.exe \"%s\" /grant *S-1-5-18:F", sys, dstdll);
-            run_quiet(cmd);
-            MoveFileExW(dstdll, oldp, MOVEFILE_REPLACE_EXISTING);  /* rename in-use aside */
-            if (CopyFileW(srcdll, dstdll, FALSE))
-                agent_log("GL: deployed Mesa opengl32 trio to System32.");
-            else
-                agent_log("GL: opengl32 -> System32 failed (%lu).", GetLastError());
-        } else {
-            agent_log("GL: Mesa opengl32 already current in System32.");
-        }
+        if (gl_provision_runtime(dir, native_dir, sys, &native_runtime))
+            agent_log("GL: OpenGL runtime provisioned in System32.");
+        else
+            agent_log("GL: opengl32 -> System32 failed (%lu).", GetLastError());
     } else {
         agent_log("GL: GetSystemDirectory failed; OpenGL not deployed.");
     }
 
     /* OpenCL: Khronos vendor key — value name = ICD path, data 0 (= load it). */
-    swprintf_s(path, MAX_PATH, L"%s\\OpenCLOn12.dll", dir);
-    if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
-        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Khronos\\OpenCL\\Vendors",
-                0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL) == ERROR_SUCCESS) {
-            RegSetValueExW(key, path, 0, REG_DWORD, (const BYTE *)&zero, sizeof(zero));
-            RegCloseKey(key);
-            agent_log("GL: registered OpenCL ICD %ls", path);
+    if (dir[0]) {
+        swprintf_s(path, MAX_PATH, L"%s\\OpenCLOn12.dll", dir);
+        if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
+            if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Khronos\\OpenCL\\Vendors",
+                    0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL) == ERROR_SUCCESS) {
+                RegSetValueExW(key, path, 0, REG_DWORD, (const BYTE *)&zero, sizeof(zero));
+                RegCloseKey(key);
+                agent_log("GL: registered OpenCL ICD %ls", path);
+            }
         }
     }
 
-    /* Vulkan: Khronos driver key — value name = ICD manifest path, data 0.
+    /* Vulkan: Khronos driver key — value name = ICD manifest path.
        The manifest's library_path is the absolute guest DLL path (set host-side
        in d3dlayers.c) so the loader can LoadLibraryEx it under
        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, which requires a fully-qualified path. */
-    swprintf_s(path, MAX_PATH, L"%s\\dzn_icd.json", dir);
-    if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
+    if (dir[0]) {
+        swprintf_s(path, MAX_PATH, L"%s\\dzn_icd.json", dir);
+    } else {
+        UINT length = GetWindowsDirectoryW(dst, MAX_PATH);
+        if (!length || length >= MAX_PATH ||
+            swprintf_s(path, MAX_PATH, L"%s\\AppSandbox\\d3dlayers\\dzn_icd.json", dst) < 0)
+            return;
+    }
+    if (native_runtime || GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
+        DWORD disabled = native_runtime ? 1 : 0;
         if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Khronos\\Vulkan\\Drivers",
                 0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL) == ERROR_SUCCESS) {
-            RegSetValueExW(key, path, 0, REG_DWORD, (const BYTE *)&zero, sizeof(zero));
+            RegSetValueExW(key, path, 0, REG_DWORD, (const BYTE *)&disabled, sizeof(disabled));
             RegCloseKey(key);
-            agent_log("GL: registered Vulkan (Dozen) ICD %ls", path);
+            if (!native_runtime) agent_log("GL: registered Vulkan (Dozen) ICD %ls", path);
         }
     }
 
@@ -605,9 +571,10 @@ static DWORD WINAPI gpu_copy_thread(LPVOID param)
     int total_files = 0;
     int failed_shares = 0;
     char msg[256];
-    wchar_t gl_dir[MAX_PATH];
+    wchar_t gl_dir[MAX_PATH], native_dir[MAX_PATH];
 
     gl_dir[0] = 0;
+    native_dir[0] = 0;
     agent_log("GPU copy starting (%d shares)...", state->count);
 
     for (i = 0; i < state->count; i++) {
@@ -637,13 +604,20 @@ static DWORD WINAPI gpu_copy_thread(LPVOID param)
             /* This list is also sent after reconnects. Seed missing files;
                existing profiles belong to the guest. The host's runtime
                lock file is recreated locally by NVIDIA when needed. */
-            const P9CopyOptions options = { TRUE, "nvdrswr.lk" };
+            const P9CopyOptions options = { TRUE, "nvdrswr.lk", NULL };
             if (nvidia_drs_prepare(dest_wide))
                 rc = p9_copy_share_ex(50001, si->share_name, dest_wide,
                                      si->filter[0] ? si->filter : NULL,
                                      &options, &files);
             else
                 rc = P9_ERR_IO;
+        } else if (strcmp(si->share_name, "AppSandbox.Nvidia") == 0) {
+            const P9CopyOptions options = {
+                FALSE, NULL, "AppSandbox-NVIDIA-VK-GL-shim.dll;AppSandbox-NVIDIA-VK-GL-shim32.dll"
+            };
+            rc = p9_copy_share_ex(50001, si->share_name, dest_wide,
+                                 si->filter[0] ? si->filter : NULL,
+                                 &options, &files);
         } else {
             rc = p9_copy_share(50001, si->share_name, dest_wide,
                                si->filter[0] ? si->filter : NULL, &files);
@@ -654,6 +628,8 @@ static DWORD WINAPI gpu_copy_thread(LPVOID param)
             failed_shares++;
         } else {
             agent_log("GPU copy share '%s' done (%d files).", si->share_name, files);
+            if (strcmp(si->share_name, "AppSandbox.Nvidia") == 0)
+                wcscpy_s(native_dir, MAX_PATH, dest_wide);
         }
         total_files += files;
 
@@ -662,13 +638,6 @@ static DWORD WINAPI gpu_copy_thread(LPVOID param)
         if (state->notify_sock != NULL)
             send_line(state->notify_sock, msg);
     }
-
-    /* Provision the GL/CL/Vulkan mapping layers now — AFTER the GPU driver copy
-       but BEFORE the device disable/enable cycle, so the GL configuration (Mesa
-       opengl32 trio + dxil.dll in System32, Khronos OpenCL/Vulkan keys) is in
-       place when the GPU device is restarted below. */
-    if (gl_dir[0])
-        gl_provision(gl_dir);
 
     /* If files were copied and vrd.inf has error 43, restart GPU + IDD devices
        and re-disable Hyper-V Video adapter. */
@@ -685,6 +654,9 @@ static DWORD WINAPI gpu_copy_thread(LPVOID param)
     } else {
         agent_log("All GPU driver files already present (pre-staged) - no copy or restart needed.");
     }
+
+    if (failed_shares == 0 && (gl_dir[0] || native_dir[0] || gl_uses_system_runtime()))
+        gl_provision(gl_dir, native_dir);
 
     /* Send final result to host */
     if (failed_shares == 0) {

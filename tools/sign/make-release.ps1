@@ -406,6 +406,9 @@ $required = @(
     'drivers\devcon.exe', 'resources', 'web',
     'headless-api\asb.py', 'headless-api\README.md', 'headless-api\examples', 'headless-api\tests'
 )
+if ($Platform -eq 'x64') {
+    $required += 'resources\nvidia\AppSandbox-NVIDIA-VK-GL-shim.dll', 'resources\nvidia\AppSandbox-NVIDIA-VK-GL-shim32.dll'
+}
 $missing = @($required | Where-Object { -not (Test-Path (Join-Path $stage $_)) })
 if ($missing.Count) { throw "Refusing to package - missing expected artifacts: $($missing -join ', ')" }
 
