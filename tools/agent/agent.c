@@ -27,7 +27,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include "p9copy.h"
-#include "gl_provision.h"
+#include "gl_vk_provision.h"
 #include "../transport/asb_transport.h"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -474,7 +474,7 @@ static void gl_provision(const wchar_t *dir, const wchar_t *native_dir)
     }
 
     if (GetSystemDirectoryW(sys, MAX_PATH)) {
-        if (gl_provision_runtime(dir, native_dir, sys, &native_runtime))
+        if (gl_vk_provision_runtime(dir, native_dir, sys, &native_runtime))
             agent_log("GL: OpenGL runtime provisioned in System32.");
         else
             agent_log("GL: opengl32 -> System32 failed (%lu).", GetLastError());
@@ -655,7 +655,7 @@ static DWORD WINAPI gpu_copy_thread(LPVOID param)
         agent_log("All GPU driver files already present (pre-staged) - no copy or restart needed.");
     }
 
-    if (failed_shares == 0 && (gl_dir[0] || native_dir[0] || gl_uses_system_runtime()))
+    if (failed_shares == 0 && (gl_dir[0] || native_dir[0] || gpu_prefers_system_opengl()))
         gl_provision(gl_dir, native_dir);
 
     /* Send final result to host */

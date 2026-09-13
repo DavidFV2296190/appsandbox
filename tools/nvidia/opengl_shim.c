@@ -1,4 +1,4 @@
-#include "nvidia.h"
+#include "adapter_hooks.h"
 
 #define WGL_FUNCTIONS(X) \
     X(int, wglChoosePixelFormat, (HDC dc, const PIXELFORMATDESCRIPTOR *format), \
@@ -56,14 +56,14 @@ WGL_FUNCTIONS(WGL_DECLARE)
 
 static INIT_ONCE s_opengl_once = INIT_ONCE_STATIC_INIT;
 
-static BOOL CALLBACK opengl_initialize(PINIT_ONCE once, PVOID parameter, PVOID *context)
+static BOOL CALLBACK load_opengl_backend(PINIT_ONCE once, PVOID parameter, PVOID *context)
 {
     HMODULE module;
     (void)once;
     (void)parameter;
     (void)context;
 
-    nvidia_initialize();
+    nvidia_install_adapter_hooks();
     module = LoadLibraryExW(L"appsandbox-opengl32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!module) return TRUE;
 
@@ -77,7 +77,7 @@ static BOOL CALLBACK opengl_initialize(PINIT_ONCE once, PVOID parameter, PVOID *
 #define WGL_FORWARD(result, name, parameters, arguments, failure) \
     result WINAPI opengl_##name parameters \
     { \
-        InitOnceExecuteOnce(&s_opengl_once, opengl_initialize, NULL, NULL); \
+        InitOnceExecuteOnce(&s_opengl_once, load_opengl_backend, NULL, NULL); \
         if (!real_##name) { \
             SetLastError(ERROR_PROC_NOT_FOUND); \
             return failure; \

@@ -544,7 +544,7 @@ static BOOL skip_preserved_file(P9Session *s, const char *name,
     return FALSE;
 }
 
-static BOOL refresh_file(P9Session *s, const char *name)
+static BOOL should_refresh_file(P9Session *s, const char *name)
 {
     char buf[4096], *tok, *ctx;
     if (!s->options.refresh_filter) return FALSE;
@@ -577,7 +577,7 @@ static BOOL copy_file(P9Session *s, UINT32 parent_fid, const char *name,
         WIN32_FILE_ATTRIBUTE_DATA attr;
         if (GetFileAttributesExW(local_path, GetFileExInfoStandard, &attr)) {
             UINT64 local_size = ((UINT64)attr.nFileSizeHigh << 32) | attr.nFileSizeLow;
-            if (local_size == file_size && !refresh_file(s, name)) {
+            if (local_size == file_size && !should_refresh_file(s, name)) {
                 P9LOG("9P skip (exists, same size): %s", name);
                 return TRUE;
             }

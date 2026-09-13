@@ -1,4 +1,4 @@
-#include "nvidia.h"
+#include "adapter_hooks.h"
 #include <string.h>
 
 typedef int VkResult;
@@ -41,7 +41,7 @@ VkResult WINAPI vk_icdEnumerateAdapterPhysicalDevices(VkInstance instance, LUID 
                                                       UINT *count, VkPhysicalDevice *devices);
 VkFunction WINAPI vk_icdGetPhysicalDeviceProcAddr(VkInstance instance, const char *name);
 
-static BOOL CALLBACK initialize(PINIT_ONCE once, PVOID parameter, PVOID *context)
+static BOOL CALLBACK load_vulkan_icd(PINIT_ONCE once, PVOID parameter, PVOID *context)
 {
     wchar_t path[MAX_PATH];
     HMODULE driver;
@@ -62,7 +62,7 @@ static BOOL CALLBACK initialize(PINIT_ONCE once, PVOID parameter, PVOID *context
     return TRUE;
 }
 
-static BOOL CALLBACK initialize_interfaces(PINIT_ONCE once, PVOID parameter, PVOID *context)
+static BOOL CALLBACK resolve_icd_interfaces(PINIT_ONCE once, PVOID parameter, PVOID *context)
 {
     (void)once;
     (void)parameter;
@@ -77,7 +77,7 @@ static BOOL CALLBACK initialize_interfaces(PINIT_ONCE once, PVOID parameter, PVO
     return TRUE;
 }
 
-static void map_properties(void *properties)
+static void map_device_luids_to_guest(void *properties)
 {
     VkProperty *property = ((VkProperty *)properties)->next;
     for (; property; property = property->next) {
@@ -87,36 +87,36 @@ static void map_properties(void *properties)
             LUID luid;
             if (!identity->luid_valid) continue;
             memcpy(&luid, identity->luid, sizeof(luid));
-            if (nvidia_map_guest_luid(&luid))
+            if (nvidia_map_luid_to_guest(&luid))
                 memcpy(identity->luid, &luid, sizeof(luid));
         }
     }
 }
 
-static void WINAPI get_properties(VkPhysicalDevice device, void *properties)
+static void WINAPI get_physical_device_properties2_hook(VkPhysicalDevice device, void *properties)
 {
     PropertiesFn function = (PropertiesFn)InterlockedCompareExchangePointer(&g_properties, NULL, NULL);
     function(device, properties);
-    map_properties(properties);
+    map_device_luids_to_guest(properties);
 }
 
-static void WINAPI get_properties_khr(VkPhysicalDevice device, void *properties)
+static void WINAPI get_physical_device_properties2_khr_hook(VkPhysicalDevice device, void *properties)
 {
     PropertiesFn function = (PropertiesFn)InterlockedCompareExchangePointer(&g_properties_khr, NULL, NULL);
     function(device, properties);
-    map_properties(properties);
+    map_device_luids_to_guest(properties);
 }
 
-static VkFunction wrap_proc(const char *name, VkFunction function)
+static VkFunction wrap_device_properties_proc(const char *name, VkFunction function)
 {
     if (!function) return NULL;
     if (strcmp(name, "vkGetPhysicalDeviceProperties2") == 0) {
         InterlockedCompareExchangePointer(&g_properties, (PVOID)function, NULL);
-        return (VkFunction)get_properties;
+        return (VkFunction)get_physical_device_properties2_hook;
     }
     if (strcmp(name, "vkGetPhysicalDeviceProperties2KHR") == 0) {
         InterlockedCompareExchangePointer(&g_properties_khr, (PVOID)function, NULL);
-        return (VkFunction)get_properties_khr;
+        return (VkFunction)get_physical_device_properties2_khr_hook;
     }
     return function;
 }
@@ -124,43 +124,43 @@ static VkFunction wrap_proc(const char *name, VkFunction function)
 VkResult WINAPI vk_icdNegotiateLoaderICDInterfaceVersion(UINT *version)
 {
     VkResult result;
-    InitOnceExecuteOnce(&g_once, initialize, NULL, NULL);
+    InitOnceExecuteOnce(&g_once, load_vulkan_icd, NULL, NULL);
     if (!version || !g_negotiate || !g_instance_proc)
         return VK_ERROR_INCOMPATIBLE_DRIVER;
     result = g_negotiate(version);
     if (result == 0)
-        InitOnceExecuteOnce(&g_interfaces_once, initialize_interfaces, NULL, NULL);
+        InitOnceExecuteOnce(&g_interfaces_once, resolve_icd_interfaces, NULL, NULL);
     return result;
 }
 
 VkFunction WINAPI vk_icdGetInstanceProcAddr(VkInstance instance, const char *name)
 {
-    InitOnceExecuteOnce(&g_once, initialize, NULL, NULL);
+    InitOnceExecuteOnce(&g_once, load_vulkan_icd, NULL, NULL);
     if (!name || !g_instance_proc) return NULL;
     if (g_negotiate && strcmp(name, "vk_icdNegotiateLoaderICDInterfaceVersion") == 0)
         return (VkFunction)vk_icdNegotiateLoaderICDInterfaceVersion;
-    InitOnceExecuteOnce(&g_interfaces_once, initialize_interfaces, NULL, NULL);
+    InitOnceExecuteOnce(&g_interfaces_once, resolve_icd_interfaces, NULL, NULL);
     if (g_enumerate && strcmp(name, "vk_icdEnumerateAdapterPhysicalDevices") == 0)
         return (VkFunction)vk_icdEnumerateAdapterPhysicalDevices;
     if (g_physical_proc && strcmp(name, "vk_icdGetPhysicalDeviceProcAddr") == 0)
         return (VkFunction)vk_icdGetPhysicalDeviceProcAddr;
-    return wrap_proc(name, g_instance_proc(instance, name));
+    return wrap_device_properties_proc(name, g_instance_proc(instance, name));
 }
 
 VkFunction WINAPI vk_icdGetPhysicalDeviceProcAddr(VkInstance instance, const char *name)
 {
-    InitOnceExecuteOnce(&g_once, initialize, NULL, NULL);
-    InitOnceExecuteOnce(&g_interfaces_once, initialize_interfaces, NULL, NULL);
-    return name && g_physical_proc ? wrap_proc(name, g_physical_proc(instance, name)) : NULL;
+    InitOnceExecuteOnce(&g_once, load_vulkan_icd, NULL, NULL);
+    InitOnceExecuteOnce(&g_interfaces_once, resolve_icd_interfaces, NULL, NULL);
+    return name && g_physical_proc ? wrap_device_properties_proc(name, g_physical_proc(instance, name)) : NULL;
 }
 
 VkResult WINAPI vk_icdEnumerateAdapterPhysicalDevices(VkInstance instance, LUID luid,
                                                       UINT *count, VkPhysicalDevice *devices)
 {
-    InitOnceExecuteOnce(&g_once, initialize, NULL, NULL);
-    InitOnceExecuteOnce(&g_interfaces_once, initialize_interfaces, NULL, NULL);
+    InitOnceExecuteOnce(&g_once, load_vulkan_icd, NULL, NULL);
+    InitOnceExecuteOnce(&g_interfaces_once, resolve_icd_interfaces, NULL, NULL);
     if (!count || !g_enumerate) return VK_ERROR_INCOMPATIBLE_DRIVER;
-    nvidia_map_adapter_luid(&luid);
+    nvidia_map_luid_to_icd(&luid);
     return g_enumerate(instance, luid, count, devices);
 }
 

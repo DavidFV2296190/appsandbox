@@ -12,13 +12,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
-#include "gl_provision.h"
+#include "gl_vk_provision.h"
 
 #pragma comment(lib, "wintrust.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "version.lib")
 
-BOOL gl_uses_system_runtime(void)
+BOOL gpu_prefers_system_opengl(void)
 {
 #if defined(_M_X64)
     HMODULE gdi = LoadLibraryW(L"gdi32.dll");
@@ -135,7 +135,7 @@ done:
     return result;
 }
 
-static BOOL microsoft_trust(WINTRUST_DATA *trust)
+static BOOL verify_microsoft_signature(WINTRUST_DATA *trust)
 {
     static const GUID verify_policy = WINTRUST_ACTION_GENERIC_VERIFY_V2;
     CRYPT_PROVIDER_DATA *provider;
@@ -161,7 +161,7 @@ static BOOL microsoft_trust(WINTRUST_DATA *trust)
     return result;
 }
 
-static BOOL microsoft_opengl(const wchar_t *path)
+static BOOL is_microsoft_opengl(const wchar_t *path)
 {
     WINTRUST_FILE_INFO file = { sizeof(file) };
     WINTRUST_DATA trust = { sizeof(trust) };
@@ -193,7 +193,7 @@ static BOOL microsoft_opengl(const wchar_t *path)
     file.pcwszFilePath = path;
     trust.dwUnionChoice = WTD_CHOICE_FILE;
     trust.pFile = &file;
-    if (microsoft_trust(&trust)) return TRUE;
+    if (verify_microsoft_signature(&trust)) return TRUE;
     {
         const wchar_t *algorithms[] = { L"SHA256", L"SHA1" };
         HANDLE input = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
@@ -230,7 +230,7 @@ static BOOL microsoft_opengl(const wchar_t *path)
                     trust.cbStruct = sizeof(trust);
                     trust.dwUnionChoice = WTD_CHOICE_CATALOG;
                     trust.pCatalog = &member;
-                    if (microsoft_trust(&trust)) {
+                    if (verify_microsoft_signature(&trust)) {
                         result = TRUE;
                         CryptCATAdminReleaseCatalogContext(admin, catalog, 0);
                         break;
@@ -244,7 +244,7 @@ static BOOL microsoft_opengl(const wchar_t *path)
     return result;
 }
 
-static BOOL unlock_runtime(const wchar_t *path)
+static BOOL grant_system_file_control(const wchar_t *path)
 {
     HANDLE token;
     TOKEN_PRIVILEGES privileges = { 1 };
@@ -290,7 +290,7 @@ static BOOL unlock_runtime(const wchar_t *path)
 }
 
 #if defined(_M_X64)
-static BOOL runtime_image(const wchar_t *path, WORD machine, BOOL native)
+static BOOL validate_opengl_dll(const wchar_t *path, WORD machine, BOOL native)
 {
     HMODULE module = LoadLibraryExW(path, NULL, LOAD_LIBRARY_AS_IMAGE_RESOURCE);
     BYTE *base;
@@ -333,7 +333,7 @@ done:
     return found;
 }
 
-static UINT nvidia_manifests(wchar_t paths[32][MAX_PATH], const wchar_t *sys,
+static UINT find_nvidia_vulkan_manifests(wchar_t paths[32][MAX_PATH], const wchar_t *sys,
                              const wchar_t *manifest)
 {
     typedef NTSTATUS (APIENTRY *EnumAdaptersFn)(const D3DKMT_ENUMADAPTERS2 *);
@@ -426,13 +426,13 @@ done:
     return count;
 }
 
-static const char *json_space(const char *p)
+static const char *json_skip_whitespace(const char *p)
 {
     while (*p == ' ' || *p == '\r' || *p == '\n' || *p == '\t') p++;
     return p;
 }
 
-static const char *json_string(const char *p)
+static const char *json_skip_string(const char *p)
 {
     if (*p++ != '"') return NULL;
     while (*p && *p != '"') {
@@ -453,29 +453,29 @@ static const char *json_string(const char *p)
     return *p == '"' ? p + 1 : NULL;
 }
 
-static const char *json_value(const char *p, int depth)
+static const char *json_skip_value(const char *p, int depth)
 {
     char end;
     if (depth > 32) return NULL;
-    p = json_space(p);
-    if (*p == '"') return json_string(p);
+    p = json_skip_whitespace(p);
+    if (*p == '"') return json_skip_string(p);
     if (*p == '{' || *p == '[') {
         BOOL object = *p == '{';
         end = object ? '}' : ']';
-        p = json_space(p + 1);
+        p = json_skip_whitespace(p + 1);
         if (*p == end) return p + 1;
         for (;;) {
             if (object) {
-                p = json_string(p);
-                if (!p || *(p = json_space(p)) != ':') return NULL;
+                p = json_skip_string(p);
+                if (!p || *(p = json_skip_whitespace(p)) != ':') return NULL;
                 p++;
             }
-            p = json_value(p, depth + 1);
+            p = json_skip_value(p, depth + 1);
             if (!p) return NULL;
-            p = json_space(p);
+            p = json_skip_whitespace(p);
             if (*p == end) return p + 1;
             if (*p++ != ',') return NULL;
-            p = json_space(p);
+            p = json_skip_whitespace(p);
         }
     }
     if (!strncmp(p, "true", 4)) return p + 4;
@@ -501,35 +501,35 @@ static const char *json_value(const char *p, int depth)
     return p;
 }
 
-static const char *json_member(const char *p, const char *key)
+static const char *json_find_member(const char *p, const char *key)
 {
     const char *name, *end, *found = NULL;
     size_t length = strlen(key);
-    p = json_space(p);
+    p = json_skip_whitespace(p);
     if (*p++ != '{') return NULL;
-    p = json_space(p);
+    p = json_skip_whitespace(p);
     while (*p && *p != '}') {
         name = p;
-        end = json_string(p);
+        end = json_skip_string(p);
         if (!end) return NULL;
-        p = json_space(end);
+        p = json_skip_whitespace(end);
         if (*p++ != ':') return NULL;
-        p = json_space(p);
+        p = json_skip_whitespace(p);
         if ((size_t)(end - name) == length + 2 && !memcmp(name + 1, key, length)) {
             if (found) return NULL;
             found = p;
         }
-        p = json_value(p, 0);
+        p = json_skip_value(p, 0);
         if (!p) return NULL;
-        p = json_space(p);
+        p = json_skip_whitespace(p);
         if (*p == '}') break;
         if (*p++ != ',') return NULL;
-        p = json_space(p);
+        p = json_skip_whitespace(p);
     }
     return found;
 }
 
-static char *read_manifest(const wchar_t *path, const char **library, const char **end)
+static char *read_vulkan_manifest(const wchar_t *path, const char **library, const char **end)
 {
     FILE *file;
     long length;
@@ -545,18 +545,18 @@ static char *read_manifest(const wchar_t *path, const char **library, const char
     }
     fclose(file);
     if (memchr(text, 0, length)) { free(text); return NULL; }
-    tail = json_value(text, 0);
-    icd = json_member(text, "ICD");
-    *library = icd ? json_member(icd, "library_path") : NULL;
-    *end = *library ? json_string(*library) : NULL;
-    if (!tail || *json_space(tail) || !*library || !*end) {
+    tail = json_skip_value(text, 0);
+    icd = json_find_member(text, "ICD");
+    *library = icd ? json_find_member(icd, "library_path") : NULL;
+    *end = *library ? json_skip_string(*library) : NULL;
+    if (!tail || *json_skip_whitespace(tail) || !*library || !*end) {
         free(text);
         return NULL;
     }
     return text;
 }
 
-static BOOL manifest_redirect(const wchar_t *path, const wchar_t *runtime, BOOL restore)
+static BOOL update_vulkan_icd_path(const wchar_t *path, const wchar_t *runtime, BOOL restore)
 {
     wchar_t backup[MAX_PATH], temporary[MAX_PATH], folder[MAX_PATH], *slash;
     char utf8[MAX_PATH * 4], escaped[MAX_PATH * 8 + 3];
@@ -575,7 +575,7 @@ static BOOL manifest_redirect(const wchar_t *path, const wchar_t *runtime, BOOL 
     }
     escaped[n++] = '"';
     escaped[n] = 0;
-    text = read_manifest(path, &library, &end);
+    text = read_vulkan_manifest(path, &library, &end);
     if (!text) return FALSE;
     ours = (size_t)(end - library) == n && !memcmp(library, escaped, n);
     swprintf_s(backup, MAX_PATH, L"%s.asbak", path);
@@ -583,7 +583,7 @@ static BOOL manifest_redirect(const wchar_t *path, const wchar_t *runtime, BOOL 
         char *original;
         const char *old_library, *old_end;
         if (!ours) { free(text); return TRUE; }
-        original = read_manifest(backup, &old_library, &old_end);
+        original = read_vulkan_manifest(backup, &old_library, &old_end);
         if (original) {
             BOOL valid = (size_t)(old_end - old_library) != n ||
                          memcmp(old_library, escaped, n);
@@ -612,7 +612,7 @@ static BOOL manifest_redirect(const wchar_t *path, const wchar_t *runtime, BOOL 
     return result;
 }
 
-static BOOL restore_manifests(const wchar_t *sys, const wchar_t *runtime,
+static BOOL restore_nvidia_vulkan_manifests(const wchar_t *sys, const wchar_t *runtime,
                               const wchar_t *manifest)
 {
     const wchar_t *stores[] = { L"HostDriverStore", L"DriverStore" };
@@ -625,7 +625,7 @@ static BOOL restore_manifests(const wchar_t *sys, const wchar_t *runtime,
     swprintf_s(path, MAX_PATH, L"%s\\%s.asbak", sys, manifest);
     if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
         path[wcslen(path) - wcslen(L".asbak")] = 0;
-        if (!manifest_redirect(path, runtime, TRUE)) result = FALSE;
+        if (!update_vulkan_icd_path(path, runtime, TRUE)) result = FALSE;
     }
     for (i = 0; i < sizeof(stores) / sizeof(stores[0]); i++) {
         swprintf_s(pattern, MAX_PATH, L"%s\\%s\\FileRepository\\*", sys, stores[i]);
@@ -642,7 +642,7 @@ static BOOL restore_manifests(const wchar_t *sys, const wchar_t *runtime,
                        sys, stores[i], data.cFileName, manifest);
             if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) continue;
             path[wcslen(path) - wcslen(L".asbak")] = 0;
-            if (!manifest_redirect(path, runtime, TRUE)) result = FALSE;
+            if (!update_vulkan_icd_path(path, runtime, TRUE)) result = FALSE;
         } while (FindNextFileW(find, &data));
         FindClose(find);
     }
@@ -650,7 +650,7 @@ static BOOL restore_manifests(const wchar_t *sys, const wchar_t *runtime,
 }
 #endif
 
-static BOOL provision_runtime(const wchar_t *dir, const wchar_t *native_dir,
+static BOOL provision_gl_vk_for_arch(const wchar_t *dir, const wchar_t *native_dir,
                                const wchar_t *sys, const wchar_t *driver_sys,
                                WORD machine, BOOL system_runtime, BOOL *native_runtime)
 {
@@ -660,9 +660,9 @@ static BOOL provision_runtime(const wchar_t *dir, const wchar_t *native_dir,
     if (native_runtime) *native_runtime = FALSE;
     swprintf_s(runtime, MAX_PATH, L"%s\\opengl32.dll", sys);
     swprintf_s(backup, MAX_PATH, L"%s\\opengl32.dll.msbak", sys);
-    microsoft = microsoft_opengl(runtime);
+    microsoft = is_microsoft_opengl(runtime);
 #if defined(_M_X64)
-    if (microsoft && !runtime_image(runtime, machine, FALSE)) return FALSE;
+    if (microsoft && !validate_opengl_dll(runtime, machine, FALSE)) return FALSE;
 #endif
     if (microsoft && !replace_file(runtime, backup)) return FALSE;
 #if defined(_M_X64)
@@ -676,26 +676,26 @@ static BOOL provision_runtime(const wchar_t *dir, const wchar_t *native_dir,
         src[0] = 0;
         if (native_dir && native_dir[0])
             swprintf_s(src, MAX_PATH, L"%s\\%s", native_dir, payload);
-        if (src[0] && runtime_image(src, machine, TRUE) &&
-            (count = nvidia_manifests(manifests, driver_sys, manifest)) != 0 &&
-            microsoft_opengl(backup) && runtime_image(backup, machine, FALSE)) {
+        if (src[0] && validate_opengl_dll(src, machine, TRUE) &&
+            (count = find_nvidia_vulkan_manifests(manifests, driver_sys, manifest)) != 0 &&
+            is_microsoft_opengl(backup) && validate_opengl_dll(backup, machine, FALSE)) {
             swprintf_s(backend, MAX_PATH, L"%s\\appsandbox-opengl32.dll", sys);
             if (replace_file(backup, backend) &&
                 GetTempFileNameW(sys, L"asb", 0, previous)) {
                 BOOL saved = CopyFileW(runtime, previous, FALSE);
                 BOOL installed = saved &&
-                    (files_equal(src, runtime) || unlock_runtime(runtime)) &&
+                    (files_equal(src, runtime) || grant_system_file_control(runtime)) &&
                     replace_file(src, runtime);
                 if (installed) {
                     for (i = 0; i < count; i++)
-                        if (!manifest_redirect(manifests[i], runtime, FALSE)) break;
+                        if (!update_vulkan_icd_path(manifests[i], runtime, FALSE)) break;
                     if (i == count) {
                         DeleteFileW(previous);
                         if (native_runtime) *native_runtime = TRUE;
                         return TRUE;
                     }
                     {
-                        BOOL manifests_restored = restore_manifests(driver_sys, runtime, manifest);
+                        BOOL manifests_restored = restore_nvidia_vulkan_manifests(driver_sys, runtime, manifest);
                         BOOL runtime_restored = replace_file(previous, runtime);
                         if (!runtime_restored) return FALSE;
                         if (!manifests_restored) {
@@ -707,18 +707,18 @@ static BOOL provision_runtime(const wchar_t *dir, const wchar_t *native_dir,
                 DeleteFileW(previous);
             }
         }
-        if (!restore_manifests(driver_sys, runtime, manifest)) return FALSE;
+        if (!restore_nvidia_vulkan_manifests(driver_sys, runtime, manifest)) return FALSE;
         if (system_runtime) {
             BOOL installed = microsoft ||
-                (microsoft_opengl(backup) && runtime_image(backup, machine, FALSE) &&
+                (is_microsoft_opengl(backup) && validate_opengl_dll(backup, machine, FALSE) &&
                  (GetFileAttributesW(runtime) == INVALID_FILE_ATTRIBUTES ||
-                  unlock_runtime(runtime)) && replace_file(backup, runtime));
+                  grant_system_file_control(runtime)) && replace_file(backup, runtime));
             if (native_runtime) *native_runtime = installed;
             return installed;
         }
-        if ((!dir || !dir[0]) && runtime_image(runtime, machine, TRUE)) {
-            if (!microsoft_opengl(backup) || !runtime_image(backup, machine, FALSE) ||
-                !unlock_runtime(runtime) ||
+        if ((!dir || !dir[0]) && validate_opengl_dll(runtime, machine, TRUE)) {
+            if (!is_microsoft_opengl(backup) || !validate_opengl_dll(backup, machine, FALSE) ||
+                !grant_system_file_control(runtime) ||
                 !replace_file(backup, runtime)) return FALSE;
         }
     }
@@ -728,7 +728,7 @@ static BOOL provision_runtime(const wchar_t *dir, const wchar_t *native_dir,
     (void)machine;
     (void)system_runtime;
 #endif
-    if (!dir || !dir[0]) return machine == IMAGE_FILE_MACHINE_I386 && microsoft_opengl(runtime);
+    if (!dir || !dir[0]) return machine == IMAGE_FILE_MACHINE_I386 && is_microsoft_opengl(runtime);
     swprintf_s(src, MAX_PATH, L"%s\\gallium_wgl.dll", dir);
     swprintf_s(dst, MAX_PATH, L"%s\\gallium_wgl.dll", sys);
     if (!replace_file(src, dst)) return FALSE;
@@ -739,16 +739,16 @@ static BOOL provision_runtime(const wchar_t *dir, const wchar_t *native_dir,
     if (files_equal(src, runtime)) return TRUE;
     if (GetFileAttributesW(backup) == INVALID_FILE_ATTRIBUTES && !microsoft) return FALSE;
     return (GetFileAttributesW(runtime) == INVALID_FILE_ATTRIBUTES ||
-            unlock_runtime(runtime)) && replace_file(src, runtime);
+            grant_system_file_control(runtime)) && replace_file(src, runtime);
 }
 
-BOOL gl_provision_runtime(const wchar_t *dir, const wchar_t *native_dir,
-                          const wchar_t *sys, BOOL *native_runtime)
+BOOL gl_vk_provision_runtime(const wchar_t *dir, const wchar_t *native_dir,
+                             const wchar_t *sys, BOOL *native_runtime)
 {
 #if defined(_M_X64)
     wchar_t wow[MAX_PATH], payload[MAX_PATH], runtime[MAX_PATH];
-    BOOL system_runtime = gl_uses_system_runtime();
-    BOOL result = provision_runtime(dir, native_dir, sys, sys, IMAGE_FILE_MACHINE_AMD64,
+    BOOL system_runtime = gpu_prefers_system_opengl();
+    BOOL result = provision_gl_vk_for_arch(dir, native_dir, sys, sys, IMAGE_FILE_MACHINE_AMD64,
                                     system_runtime, native_runtime);
     if (GetSystemWow64DirectoryW(wow, MAX_PATH)) {
         payload[0] = 0;
@@ -757,15 +757,15 @@ BOOL gl_provision_runtime(const wchar_t *dir, const wchar_t *native_dir,
         swprintf_s(runtime, MAX_PATH, L"%s\\opengl32.dll", wow);
         if (system_runtime ||
             (payload[0] && GetFileAttributesW(payload) != INVALID_FILE_ATTRIBUTES) ||
-            runtime_image(runtime, IMAGE_FILE_MACHINE_I386, TRUE)) {
-            if (!provision_runtime(NULL, native_dir, wow, sys, IMAGE_FILE_MACHINE_I386,
+            validate_opengl_dll(runtime, IMAGE_FILE_MACHINE_I386, TRUE)) {
+            if (!provision_gl_vk_for_arch(NULL, native_dir, wow, sys, IMAGE_FILE_MACHINE_I386,
                                     system_runtime, NULL))
                 result = FALSE;
         }
     }
     return result;
 #else
-    return provision_runtime(dir, native_dir, sys, sys, IMAGE_FILE_MACHINE_ARM64, FALSE,
+    return provision_gl_vk_for_arch(dir, native_dir, sys, sys, IMAGE_FILE_MACHINE_ARM64, FALSE,
                               native_runtime);
 #endif
 }

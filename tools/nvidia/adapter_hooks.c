@@ -1,4 +1,4 @@
-#include "nvidia.h"
+#include "adapter_hooks.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -61,7 +61,7 @@ static BOOL query_adapter(D3DKMT_HANDLE adapter, KMTQUERYADAPTERINFOTYPE type,
     return g_query_adapter(&query) >= 0;
 }
 
-static BOOL get_icd_path(D3DKMT_HANDLE adapter, wchar_t *path, size_t capacity)
+static BOOL resolve_adapter_icd_path(D3DKMT_HANDLE adapter, wchar_t *path, size_t capacity)
 {
     D3DKMT_OPENGLINFO info = {0};
     const wchar_t *name, *source;
@@ -173,7 +173,7 @@ failed:
     return FALSE;
 }
 
-static BOOL find_adapter(void)
+static BOOL select_nvidia_adapter(void)
 {
     D3DKMT_ENUMADAPTERS2 enumeration = {0};
     D3DKMT_ADAPTERINFO *adapters;
@@ -211,7 +211,7 @@ static BOOL find_adapter(void)
                 sizeof(g_adapters[g_adapter_count].address));
             ++g_adapter_count;
             if ((found && adapters[i].NumOfSources <= best_sources) ||
-                !get_icd_path(adapters[i].hAdapter, path, MAX_PATH))
+                !resolve_adapter_icd_path(adapters[i].hAdapter, path, MAX_PATH))
                 continue;
             found = TRUE;
             best_sources = adapters[i].NumOfSources;
@@ -250,7 +250,7 @@ static BOOL find_adapter(void)
     return TRUE;
 }
 
-static BOOL find_display(void)
+static BOOL find_desktop_display_name(void)
 {
     DISPLAY_DEVICEW display = {0};
 
@@ -268,7 +268,7 @@ static BOOL find_display(void)
     return g_display.DeviceName[0] != L'\0';
 }
 
-static BOOL from_nvidia(void)
+static BOOL call_stack_contains_nvidia_icd(void)
 {
     void *frames[24];
     USHORT count = CaptureStackBackTrace(1, ARRAYSIZE(frames), frames, NULL);
@@ -304,12 +304,12 @@ static BOOL from_nvidia(void)
     return FALSE;
 }
 
-static NTSTATUS NTAPI enum_displays(PUNICODE_STRING device, DWORD index,
+static NTSTATUS NTAPI enum_display_devices_hook(PUNICODE_STRING device, DWORD index,
                                    PDISPLAY_DEVICEW display, DWORD flags)
 {
     if (InterlockedCompareExchange(&g_hooks_enabled, 0, 0) &&
         (!device || !device->Buffer || !device->Length) && display &&
-        display->cb >= sizeof(*display) && from_nvidia()) {
+        display->cb >= sizeof(*display) && call_stack_contains_nvidia_icd()) {
         if (index == 0) {
             DWORD size = display->cb;
             *display = g_display;
@@ -321,12 +321,12 @@ static NTSTATUS NTAPI enum_displays(PUNICODE_STRING device, DWORD index,
     return g_enum_displays(device, index, display, flags);
 }
 
-static NTSTATUS APIENTRY open_hdc(D3DKMT_OPENADAPTERFROMHDC *adapter)
+static NTSTATUS APIENTRY open_adapter_from_hdc_hook(D3DKMT_OPENADAPTERFROMHDC *adapter)
 {
     NTSTATUS status = g_open_hdc(adapter);
 
     if (status >= 0 && adapter && InterlockedCompareExchange(&g_hooks_enabled, 0, 0) &&
-        from_nvidia()) {
+        call_stack_contains_nvidia_icd()) {
         if (!same_luid(adapter->AdapterLuid, g_luid)) {
             D3DKMT_OPENADAPTERFROMLUID replacement = {0};
             replacement.AdapterLuid = g_luid;
@@ -347,7 +347,7 @@ static NTSTATUS APIENTRY open_hdc(D3DKMT_OPENADAPTERFROMHDC *adapter)
     return status;
 }
 
-static void *volatile *find_import(HMODULE module, const char *name)
+static void *volatile *find_win32u_import_slot(HMODULE module, const char *name)
 {
     BYTE *base = (BYTE *)module;
     IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
@@ -380,10 +380,10 @@ static void *volatile *find_import(HMODULE module, const char *name)
     return NULL;
 }
 
-static BOOL install_hooks(HMODULE user32, HMODULE gdi32)
+static BOOL install_win32u_import_hooks(HMODULE user32, HMODULE gdi32)
 {
-    void *volatile *display_slot = find_import(user32, "NtUserEnumDisplayDevices");
-    void *volatile *adapter_slot = find_import(gdi32, "NtGdiDdDDIOpenAdapterFromHdc");
+    void *volatile *display_slot = find_win32u_import_slot(user32, "NtUserEnumDisplayDevices");
+    void *volatile *adapter_slot = find_win32u_import_slot(gdi32, "NtGdiDdDDIOpenAdapterFromHdc");
     void *display_original, *adapter_original;
     DWORD display_protection, adapter_protection, unused;
     HMODULE pinned;
@@ -393,7 +393,7 @@ static BOOL install_hooks(HMODULE user32, HMODULE gdi32)
         return FALSE;
     display_original = *display_slot;
     adapter_original = *adapter_slot;
-    if (display_original == (void *)enum_displays || adapter_original == (void *)open_hdc)
+    if (display_original == (void *)enum_display_devices_hook || adapter_original == (void *)open_adapter_from_hdc_hook)
         return FALSE;
     g_enum_displays = (EnumDisplayDevicesFn)display_original;
     g_open_hdc = (PFND3DKMT_OPENADAPTERFROMHDC)adapter_original;
@@ -407,15 +407,15 @@ static BOOL install_hooks(HMODULE user32, HMODULE gdi32)
         return FALSE;
     }
     if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-                          (LPCWSTR)nvidia_initialize, &pinned) &&
-        InterlockedCompareExchangePointer(display_slot, (void *)enum_displays,
+                          (LPCWSTR)nvidia_install_adapter_hooks, &pinned) &&
+        InterlockedCompareExchangePointer(display_slot, (void *)enum_display_devices_hook,
                                           display_original) == display_original) {
-        if (InterlockedCompareExchangePointer(adapter_slot, (void *)open_hdc,
+        if (InterlockedCompareExchangePointer(adapter_slot, (void *)open_adapter_from_hdc_hook,
                                               adapter_original) == adapter_original) {
             InterlockedExchange(&g_hooks_enabled, TRUE);
             installed = TRUE;
         } else {
-            InterlockedCompareExchangePointer(display_slot, display_original, (void *)enum_displays);
+            InterlockedCompareExchangePointer(display_slot, display_original, (void *)enum_display_devices_hook);
         }
     }
     VirtualProtect((void *)adapter_slot, sizeof(*adapter_slot), adapter_protection, &unused);
@@ -423,7 +423,7 @@ static BOOL install_hooks(HMODULE user32, HMODULE gdi32)
     return installed;
 }
 
-static BOOL CALLBACK initialize(PINIT_ONCE once, PVOID parameter, PVOID *context)
+static BOOL CALLBACK initialize_adapter_hooks(PINIT_ONCE once, PVOID parameter, PVOID *context)
 {
     HMODULE user32, gdi32;
     (void)once;
@@ -439,11 +439,11 @@ static BOOL CALLBACK initialize(PINIT_ONCE once, PVOID parameter, PVOID *context
     g_open_luid = (PFND3DKMT_OPENADAPTERFROMLUID)GetProcAddress(gdi32, "D3DKMTOpenAdapterFromLuid");
     g_close_adapter = (PFND3DKMT_CLOSEADAPTER)GetProcAddress(gdi32, "D3DKMTCloseAdapter");
     if (g_enum_adapters && g_query_adapter && g_open_luid && g_close_adapter) {
-        void *volatile *slot = find_import(user32, "NtUserEnumDisplayDevices");
+        void *volatile *slot = find_win32u_import_slot(user32, "NtUserEnumDisplayDevices");
         if (slot) g_enum_displays = (EnumDisplayDevicesFn)*slot;
-        if (g_enum_displays && find_adapter() && !GetModuleHandleW(NVIDIA_ICD_NAME_W) &&
-            find_display())
-            g_ready = install_hooks(user32, gdi32);
+        if (g_enum_displays && select_nvidia_adapter() && !GetModuleHandleW(NVIDIA_ICD_NAME_W) &&
+            find_desktop_display_name())
+            g_ready = install_win32u_import_hooks(user32, gdi32);
     }
 done:
     if (!g_ready) {
@@ -456,9 +456,9 @@ done:
     return TRUE;
 }
 
-BOOL nvidia_initialize(void)
+BOOL nvidia_install_adapter_hooks(void)
 {
-    InitOnceExecuteOnce(&g_once, initialize, NULL, NULL);
+    InitOnceExecuteOnce(&g_once, initialize_adapter_hooks, NULL, NULL);
     return g_ready;
 }
 
@@ -466,14 +466,14 @@ BOOL nvidia_get_icd_path(wchar_t *path, size_t capacity)
 {
     if (!path || !capacity) return FALSE;
     path[0] = L'\0';
-    if (!nvidia_initialize() || wcslen(g_icd_path) >= capacity) return FALSE;
+    if (!nvidia_install_adapter_hooks() || wcslen(g_icd_path) >= capacity) return FALSE;
     wcscpy_s(path, capacity, g_icd_path);
     return TRUE;
 }
 
-BOOL nvidia_map_adapter_luid(LUID *luid)
+BOOL nvidia_map_luid_to_icd(LUID *luid)
 {
-    if (!luid || !nvidia_initialize()) return FALSE;
+    if (!luid || !nvidia_install_adapter_hooks()) return FALSE;
     for (ULONG i = 0; i < g_adapter_count; ++i) {
         if (same_luid(*luid, g_adapters[i].luid)) {
             *luid = g_icd_luid;
@@ -483,16 +483,16 @@ BOOL nvidia_map_adapter_luid(LUID *luid)
     return FALSE;
 }
 
-BOOL nvidia_map_guest_luid(LUID *luid)
+BOOL nvidia_map_luid_to_guest(LUID *luid)
 {
-    if (!luid || !nvidia_initialize() || !same_luid(*luid, g_icd_luid)) return FALSE;
+    if (!luid || !nvidia_install_adapter_hooks() || !same_luid(*luid, g_icd_luid)) return FALSE;
     *luid = g_luid;
     return TRUE;
 }
 
 #else
 
-BOOL nvidia_initialize(void)
+BOOL nvidia_install_adapter_hooks(void)
 {
     return FALSE;
 }
@@ -503,13 +503,13 @@ BOOL nvidia_get_icd_path(wchar_t *path, size_t capacity)
     return FALSE;
 }
 
-BOOL nvidia_map_adapter_luid(LUID *luid)
+BOOL nvidia_map_luid_to_icd(LUID *luid)
 {
     (void)luid;
     return FALSE;
 }
 
-BOOL nvidia_map_guest_luid(LUID *luid)
+BOOL nvidia_map_luid_to_guest(LUID *luid)
 {
     (void)luid;
     return FALSE;

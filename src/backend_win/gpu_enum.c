@@ -476,7 +476,7 @@ BOOL gpu_get_driver_shares(GpuList *gpu_list, GpuDriverShareList *out)
     return FALSE;
 }
 
-BOOL gpu_append_amd_runtime_shares(const GpuList *gpu_list, GpuDriverShareList *list)
+BOOL gpu_append_amd_gl_vk_driver_shares(const GpuList *gpu_list, GpuDriverShareList *list)
 {
     HDEVINFO devices;
     SP_DEVINFO_DATA device;
@@ -600,7 +600,7 @@ BOOL gpu_append_nvidia_drs_share(const GpuList *gpu_list, GpuDriverShareList *li
     return TRUE;
 }
 
-BOOL gpu_append_nvidia_share(const GpuList *gpu_list, GpuDriverShareList *list)
+BOOL gpu_append_nvidia_gl_vk_shim_share(const GpuList *gpu_list, GpuDriverShareList *list)
 {
 #if defined(_M_X64)
     wchar_t exe[MAX_PATH], path[MAX_PATH], file[MAX_PATH], *slash;
