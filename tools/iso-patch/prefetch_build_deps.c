@@ -1,7 +1,8 @@
 /* prefetch_build_deps.c - see header for design.
  *
  * Pipeline:
- *   1. WinHTTP-download Packages.xz for <codename>/main/binary-<arch>
+ *   1. WinHTTP-download main/binary-<arch>/Packages.xz for the release,
+ *      updates and security pockets.
  *   2. Decompress it in-process with the vendored xz-embedded decoder
  *      (xz_decompress_file_to_file below; Packages.gz is raw-gzipped
  *      text that tar.exe rejects, so we target the .xz instead).
@@ -9,7 +10,7 @@
  *      Package name. Each stanza is stored verbatim so we can write
  *      it back into the synthetic Packages we ship.
  *   4. BFS the Depends:/Pre-Depends: closure from seed packages.
- *      Disjunctions ("a | b"): take the first alternative that exists.
+ *      Match source versions to the ISO; leave dependency resolution to APT.
  *   5. For each pkg in closure: WinHTTP-download the .deb, verify
  *      its SHA256 against the Packages metadata.
  *   6. Write synthetic Packages with the closure stanzas, but
@@ -27,6 +28,7 @@
 #include "prefetch_build_deps.h"
 #include "iso_patch_log.h"
 #include "target_arch.h"
+#include "engine/squashfs.h"
 #include "engine/xz/xz.h"
 
 #include <windows.h>
@@ -378,6 +380,14 @@ cleanup:
 typedef struct pkg_record {
     const char *name;        /* not null-terminated; use name_len */
     size_t      name_len;
+    const char *version;
+    size_t      version_len;
+    const char *source;
+    size_t      source_len;
+    const char *source_version;
+    size_t      source_version_len;
+    const char *status;
+    size_t      status_len;
     const char *filename;
     size_t      filename_len;
     const char *sha256_hex;
@@ -390,6 +400,7 @@ typedef struct pkg_record {
     size_t      stanza_len;     /* length of the stanza (no trailing blank) */
     int         in_closure;     /* set during BFS */
     struct pkg_record *bucket_next;
+    struct pkg_record *source_next;
 } pkg_record_t;
 
 #define PKG_HASH_BUCKETS 4096   /* >> 4500 packages */
@@ -400,6 +411,7 @@ typedef struct {
     pkg_record_t *records;
     size_t        n_records;
     pkg_record_t *buckets[PKG_HASH_BUCKETS];
+    pkg_record_t *sources[PKG_HASH_BUCKETS];
 } pkg_table_t;
 
 static size_t hash_name(const char *s, size_t len)
@@ -434,6 +446,78 @@ static pkg_record_t *lookup_pkg(pkg_table_t *t, const char *name, size_t len)
         if (name_eq(r->name, r->name_len, name, len)) return r;
     }
     return NULL;
+}
+
+static pkg_record_t *lookup_source(pkg_table_t *t, const char *name, size_t len)
+{
+    for (pkg_record_t *r = t->sources[hash_name(name, len)]; r; r = r->source_next) {
+        if (name_eq(r->source, r->source_len, name, len)) return r;
+    }
+    return NULL;
+}
+
+static int mark_packages(pkg_table_t *t, pkg_table_t *installed, pkg_table_t *iso,
+                         const char *name, size_t len)
+{
+    if (lookup_pkg(installed, name, len)) return 0;
+    pkg_record_t *local = lookup_pkg(iso, name, len);
+    if (local) {
+        if (local->in_closure) return 0;
+        local->in_closure = 1;
+        return 1;
+    }
+    int added = 0, matched = 0;
+    for (pkg_record_t *r = t->buckets[hash_name(name, len)]; r; r = r->bucket_next) {
+        if (!name_eq(r->name, r->name_len, name, len)) continue;
+        pkg_record_t *pin = lookup_source(installed, r->source, r->source_len);
+        if (!pin) pin = lookup_source(iso, r->source, r->source_len);
+        if (pin && (pin->source_version_len != r->source_version_len ||
+                    memcmp(pin->source_version, r->source_version,
+                           r->source_version_len) != 0)) continue;
+        matched = 1;
+        if (!r->in_closure) {
+            r->in_closure = 1;
+            added++;
+        }
+    }
+    if (!matched && lookup_pkg(t, name, len)) return -1;
+    return added;
+}
+
+static void index_package(pkg_table_t *t, pkg_record_t *r)
+{
+    if (r->status && (r->status_len < 13 ||
+        memcmp(r->status + r->status_len - 13, " ok installed", 13) != 0)) return;
+    r->source_version = r->version;
+    r->source_version_len = r->version_len;
+    if (!r->source) {
+        r->source = r->name;
+        r->source_len = r->name_len;
+    } else {
+        const char *end = r->source + r->source_len;
+        const char *p = r->source;
+        while (p < end && *p != ' ' && *p != '(') p++;
+        r->source_len = (size_t)(p - r->source);
+        while (p < end && *p != '(') p++;
+        if (p < end) {
+            r->source_version = ++p;
+            while (p < end && *p != ')') p++;
+            r->source_version_len = (size_t)(p - r->source_version);
+        }
+    }
+    size_t h = hash_name(r->name, r->name_len);
+    for (pkg_record_t *p = t->buckets[h]; p; p = p->bucket_next) {
+        if (r->filename && p->filename && r->sha256_hex && p->sha256_hex &&
+            r->filename_len == p->filename_len && r->sha256_len == p->sha256_len &&
+            memcmp(r->filename, p->filename, r->filename_len) == 0 &&
+            memcmp(r->sha256_hex, p->sha256_hex, r->sha256_len) == 0)
+            return;
+    }
+    r->bucket_next = t->buckets[h];
+    t->buckets[h] = r;
+    h = hash_name(r->source, r->source_len);
+    r->source_next = t->sources[h];
+    t->sources[h] = r;
 }
 
 /* For a "Key: value" line, return (key, val) views or NULL if not a
@@ -507,9 +591,7 @@ static int parse_packages(pkg_table_t *t)
                            (cur->stanza_start[cur->stanza_len - 1] == '\n' ||
                             cur->stanza_start[cur->stanza_len - 1] == '\r'))
                         cur->stanza_len--;
-                    size_t h = hash_name(cur->name, cur->name_len);
-                    cur->bucket_next = t->buckets[h];
-                    t->buckets[h] = cur;
+                    index_package(t, cur);
                     ri++;
                 }
                 cur = NULL;
@@ -522,6 +604,12 @@ static int parse_packages(pkg_table_t *t)
                     if (cur) {
                         if (kl == 7 && memcmp(k, "Package", 7) == 0) {
                             cur->name = v; cur->name_len = vl;
+                        } else if (kl == 7 && memcmp(k, "Version", 7) == 0) {
+                            cur->version = v; cur->version_len = vl;
+                        } else if (kl == 6 && memcmp(k, "Source", 6) == 0) {
+                            cur->source = v; cur->source_len = vl;
+                        } else if (kl == 6 && memcmp(k, "Status", 6) == 0) {
+                            cur->status = v; cur->status_len = vl;
                         } else if (kl == 8 && memcmp(k, "Filename", 8) == 0) {
                             cur->filename = v; cur->filename_len = vl;
                         } else if (kl == 6 && memcmp(k, "SHA256", 6) == 0) {
@@ -542,16 +630,15 @@ static int parse_packages(pkg_table_t *t)
     if (cur && cur->name && !cur->stanza_start) {
         cur->stanza_start = stanza_start;
         cur->stanza_len = (size_t)(end - stanza_start);
-        size_t h = hash_name(cur->name, cur->name_len);
-        cur->bucket_next = t->buckets[h];
-        t->buckets[h] = cur;
+        index_package(t, cur);
     }
     return 0;
 }
 
 /* BFS one pass: for each pkg already in_closure, walk Depends + Pre-Depends.
  * Returns count of NEW pkgs added in this pass. */
-static int bfs_add_deps(pkg_table_t *t, pkg_record_t *r, int *added_count)
+static int bfs_add_deps(pkg_table_t *t, pkg_table_t *installed, pkg_table_t *iso,
+                        pkg_record_t *r, int *added_count)
 {
     const char *fields[2] = { r->depends, r->predepends };
     size_t lens[2]        = { r->depends_len, r->predepends_len };
@@ -561,28 +648,44 @@ static int bfs_add_deps(pkg_table_t *t, pkg_record_t *r, int *added_count)
         if (!p || n == 0) continue;
         const char *q = p;
         size_t i = 0;
+        int available = 0;
         while (i <= n) {
-            /* Walk to next ',' or end -> one Depends element. */
-            if (i == n || p[i] == ',') {
-                size_t elen = (size_t)(p + i - q);
-                /* Take first alternative (split on '|'). */
-                const char *alt_end = q;
-                while (alt_end < q + elen && *alt_end != '|') alt_end++;
-                size_t alen = (size_t)(alt_end - q);
+            if (i == n || p[i] == ',' || p[i] == '|') {
+                size_t alen = (size_t)(p + i - q);
                 /* Trim trailing/leading WS. */
                 while (alen > 0 && (q[0] == ' ' || q[0] == '\t')) { q++; alen--; }
                 while (alen > 0 && (q[alen - 1] == ' ' || q[alen - 1] == '\t' ||
                                     q[alen - 1] == '\n')) alen--;
                 /* Strip version constraint "(...)" */
                 const char *paren = q;
-                while (paren < q + alen && *paren != ' ' && *paren != '(') paren++;
+                while (paren < q + alen && *paren != ' ' && *paren != '\t' &&
+                       *paren != '(' && *paren != ':') paren++;
                 size_t name_len = (size_t)(paren - q);
+                if (paren < q + alen && *paren == ':') {
+                    const char *arch = paren + 1, *end = arch;
+                    while (end < q + alen && *end != ' ' && *end != '\t' && *end != '(') end++;
+                    size_t arch_len = (size_t)(end - arch);
+                    if (!name_eq(arch, arch_len, "any", 3) &&
+                        !name_eq(arch, arch_len, "native", 6) &&
+                        !name_eq(arch, arch_len, IP_DEB_ARCH_A, strlen(IP_DEB_ARCH_A)))
+                        name_len = 0;
+                }
                 if (name_len > 0) {
-                    pkg_record_t *dep = lookup_pkg(t, q, name_len);
-                    if (dep && !dep->in_closure) {
-                        dep->in_closure = 1;
-                        (*added_count)++;
+                    int added = mark_packages(t, installed, iso, q, name_len);
+                    if (added >= 0) {
+                        available = 1;
+                        *added_count += added;
                     }
+                } else {
+                    available = 1;
+                }
+                if (i == n || p[i] == ',') {
+                    if (!available) {
+                        log_err(L"prefetch: no ISO-compatible dependency '%.*hs' for '%.*hs'",
+                                (int)name_len, q, (int)r->name_len, r->name);
+                        return -1;
+                    }
+                    available = 0;
                 }
                 q = p + i + 1;
             }
@@ -683,10 +786,53 @@ static int write_closure_json(pkg_table_t *t,
  * Main entry point
  * ==================================================================== */
 
+static int append_package_file(pkg_table_t *t, const wchar_t *path)
+{
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart < 0 || sz.QuadPart > 64 * 1024 * 1024) {
+        CloseHandle(h);
+        return -1;
+    }
+    char *buf = (char *)realloc(t->buf, t->buf_len + (size_t)sz.QuadPart + 3);
+    if (!buf) { CloseHandle(h); return -1; }
+    t->buf = buf;
+    DWORD br = 0;
+    BOOL ok = ReadFile(h, buf + t->buf_len, (DWORD)sz.QuadPart, &br, NULL);
+    CloseHandle(h);
+    if (!ok || br != sz.QuadPart) return -1;
+    t->buf_len += br;
+    t->buf[t->buf_len++] = '\n';
+    t->buf[t->buf_len++] = '\n';
+    t->buf[t->buf_len] = 0;
+    return 0;
+}
+
+typedef struct {
+    sqfs_ctx_t *sq;
+    pkg_table_t *packages;
+} installed_packages_t;
+
+static int read_installed_packages(const sqfs_entry_t *entry, void *user)
+{
+    if (strcmp(entry->path, "/var/lib/dpkg/status") != 0) return 0;
+    installed_packages_t *ctx = (installed_packages_t *)user;
+    void *data = NULL;
+    size_t size = 0;
+    if (sqfs_read_file(ctx->sq, entry, &data, &size) == 0) {
+        ctx->packages->buf = (char *)data;
+        ctx->packages->buf_len = size;
+    }
+    return 1;
+}
+
 int do_prefetch_build_deps(const wchar_t *codename,
                            const wchar_t *kernel_ver,
                            const wchar_t *out_dir,
-                           const wchar_t *mirror_arg)
+                           const wchar_t *mirror_arg,
+                           const wchar_t *iso_root)
 {
     const wchar_t *mirror = mirror_arg ? mirror_arg
                                        : L"http://archive.ubuntu.com/ubuntu";
@@ -699,57 +845,69 @@ int do_prefetch_build_deps(const wchar_t *codename,
     u_mkdir_p(out_dir);
     const wchar_t *staging = out_dir;
 
-    /* ---- 1. Download Packages.xz ---- */
+    int rc = -1;
+    pkg_table_t T = { 0 }, installed = { 0 }, iso = { 0 };
     wchar_t pkgs_xz[MAX_PATH], pkgs[MAX_PATH];
     swprintf_s(pkgs_xz, MAX_PATH, L"%s\\Packages.xz", staging);
     swprintf_s(pkgs,    MAX_PATH, L"%s\\Packages",    staging);
 
+    wchar_t path[MAX_PATH];
+    swprintf_s(path, MAX_PATH, L"%s\\casper\\minimal.squashfs", iso_root);
+    sqfs_ctx_t *sq = sqfs_open(path);
+    if (!sq) goto cleanup;
+    installed_packages_t ctx = { sq, &installed };
+    sqfs_walk(sq, read_installed_packages, &ctx);
+    sqfs_close(sq);
+    if (!installed.buf || parse_packages(&installed) != 0) goto cleanup;
+
+    swprintf_s(path, MAX_PATH, L"%s\\dists\\%s\\main\\binary-" IP_DEB_ARCH L"\\Packages",
+               iso_root, codename);
+    if (append_package_file(&iso, path) != 0 || parse_packages(&iso) != 0) goto cleanup;
+
+    const wchar_t *pockets[] = { L"", L"-updates", L"-security" };
     wchar_t url[1024];
-    swprintf_s(url, 1024, L"%s/dists/%s/main/binary-" IP_DEB_ARCH L"/Packages.xz",
-               mirror, codename);
-    log_msg(L"prefetch: GET %s", url);
-    if (http_download(url, pkgs_xz) != 0) {
-        log_err(L"prefetch: download Packages.xz failed");
-        return -1;
-    }
-
-    /* ---- 2. In-process xz decompression via vendored xz-embedded ---- */
-    if (xz_decompress_file_to_file(pkgs_xz, pkgs) != 0) {
-        log_err(L"prefetch: xz decompress failed");
-        return -1;
-    }
-
-    /* ---- 3. Slurp Packages into memory + parse ---- */
-    pkg_table_t T = { 0 };
-    {
-        HANDLE h = CreateFileW(pkgs, GENERIC_READ, FILE_SHARE_READ, NULL,
-                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (h == INVALID_HANDLE_VALUE) { log_err(L"prefetch: open Packages failed"); return -1; }
-        LARGE_INTEGER sz; GetFileSizeEx(h, &sz);
-        T.buf_len = (size_t)sz.QuadPart;
-        T.buf = (char *)malloc(T.buf_len + 1);
-        if (!T.buf) { CloseHandle(h); return -1; }
-        DWORD br = 0;
-        if (!ReadFile(h, T.buf, (DWORD)T.buf_len, &br, NULL) || br != T.buf_len) {
-            log_err(L"prefetch: read Packages failed"); CloseHandle(h); return -1;
+    for (size_t i = 0; i < ARRAYSIZE(pockets); i++) {
+        swprintf_s(url, 1024, L"%s/dists/%s%s/main/binary-" IP_DEB_ARCH L"/Packages.xz",
+                   mirror, codename, pockets[i]);
+        log_msg(L"prefetch: GET %s", url);
+        if (http_download(url, pkgs_xz) != 0) {
+            log_err(L"prefetch: download Packages.xz failed");
+            goto cleanup;
         }
-        T.buf[T.buf_len] = 0;
-        CloseHandle(h);
+        if (xz_decompress_file_to_file(pkgs_xz, pkgs) != 0) {
+            log_err(L"prefetch: xz decompress failed");
+            goto cleanup;
+        }
+        if (append_package_file(&T, pkgs) != 0) {
+            log_err(L"prefetch: read Packages failed");
+            goto cleanup;
+        }
+        DeleteFileW(pkgs);
     }
-    if (parse_packages(&T) != 0) { log_err(L"prefetch: parse failed"); return -1; }
+    if (parse_packages(&T) != 0) { log_err(L"prefetch: parse failed"); goto cleanup; }
     log_msg(L"prefetch: parsed %zu package records", T.n_records);
 
     /* ---- 4. Mark seeds in_closure ---- */
     const char *seeds[] = {
         "libasound2-dev", "libxcb1-dev", "libxcb-xfixes0-dev",
         "libdrm-dev", "libsystemd-dev", "pkg-config",
+        "build-essential", "dkms", "zstd",
         "openssh-server"  /* for ssh_enabled VMs; firstboot installs conditionally */
     };
     int closure_count = 0;
     for (size_t i = 0; i < sizeof(seeds) / sizeof(seeds[0]); i++) {
-        pkg_record_t *r = lookup_pkg(&T, seeds[i], strlen(seeds[i]));
-        if (!r) { log_msg(L"prefetch: WARN seed '%hs' not in archive", seeds[i]); continue; }
-        if (!r->in_closure) { r->in_closure = 1; closure_count++; }
+        int added = mark_packages(&T, &installed, &iso, seeds[i], strlen(seeds[i]));
+        if (added < 0) {
+            log_err(L"prefetch: no ISO-compatible package for '%hs'", seeds[i]);
+            goto cleanup;
+        }
+        if (added == 0 && !lookup_pkg(&installed, seeds[i], strlen(seeds[i])) &&
+            !lookup_pkg(&iso, seeds[i], strlen(seeds[i])) &&
+            !lookup_pkg(&T, seeds[i], strlen(seeds[i]))) {
+            log_msg(L"prefetch: WARN seed '%hs' not in archive", seeds[i]);
+            continue;
+        }
+        closure_count += added;
     }
     /* Also linux-headers-<kver>. */
     {
@@ -757,18 +915,24 @@ int do_prefetch_build_deps(const wchar_t *codename,
         char kver_utf8[64];
         WideCharToMultiByte(CP_UTF8, 0, kernel_ver, -1, kver_utf8, sizeof(kver_utf8), NULL, NULL);
         snprintf(hdr, sizeof(hdr), "linux-headers-%s", kver_utf8);
-        pkg_record_t *r = lookup_pkg(&T, hdr, strlen(hdr));
-        if (r && !r->in_closure) { r->in_closure = 1; closure_count++; }
+        int added = mark_packages(&T, &installed, &iso, hdr, strlen(hdr));
+        if (added < 0) goto cleanup;
+        closure_count += added;
     }
 
     /* ---- 5. BFS until stable ---- */
     int total_added = closure_count;
     for (int iter = 0; iter < 32; iter++) {
         int added = 0;
+        for (size_t i = 0; i < iso.n_records; i++) {
+            pkg_record_t *r = &iso.records[i];
+            if (r->in_closure && bfs_add_deps(&T, &installed, &iso, r, &added) != 0)
+                goto cleanup;
+        }
         for (size_t i = 0; i < T.n_records; i++) {
             pkg_record_t *r = &T.records[i];
             if (!r->in_closure) continue;
-            bfs_add_deps(&T, r, &added);
+            if (bfs_add_deps(&T, &installed, &iso, r, &added) != 0) goto cleanup;
         }
         if (added == 0) break;
         total_added += added;
@@ -787,7 +951,7 @@ int do_prefetch_build_deps(const wchar_t *codename,
         if (r->filename_len >= sizeof(fn_utf8)) {
             log_err(L"prefetch: Filename too long (%zu) for %.*hs",
                     r->filename_len, (int)r->name_len, r->name);
-            return -1;
+            goto cleanup;
         }
         memcpy(fn_utf8, r->filename, r->filename_len);  fn_utf8[r->filename_len] = 0;
         if (r->sha256_hex && r->sha256_len < sizeof(sha_utf8)) {
@@ -806,18 +970,18 @@ int do_prefetch_build_deps(const wchar_t *codename,
         log_msg(L"prefetch: GET %s", basename);
         if (http_download(url2, dst) != 0) {
             log_err(L"prefetch: download %ls failed", basename);
-            return -1;
+            goto cleanup;
         }
         if (sha_utf8[0]) {
             char actual[65];
             if (sha256_file(dst, actual) != 0) {
                 log_err(L"prefetch: SHA256 hash compute failed for %ls", basename);
-                return -1;
+                goto cleanup;
             }
             if (_stricmp(actual, sha_utf8) != 0) {
                 log_err(L"prefetch: SHA256 mismatch for %ls (got %hs, want %hs)",
                         basename, actual, sha_utf8);
-                return -1;
+                goto cleanup;
             }
         }
         downloaded++;
@@ -832,7 +996,7 @@ int do_prefetch_build_deps(const wchar_t *codename,
         DeleteFileW(synth);
         if (write_synth_packages(&T, synth) != 0) {
             log_err(L"prefetch: write synthetic Packages failed");
-            return -1;
+            goto cleanup;
         }
     }
     {
@@ -841,12 +1005,16 @@ int do_prefetch_build_deps(const wchar_t *codename,
         write_closure_json(&T, cj, codename, kernel_ver);
     }
 
-    /* Clean up Packages.xz — we don't ship it (we wrote our own
-       synthetic Packages with closure entries only). */
+    rc = 0;
+cleanup:
     DeleteFileW(pkgs_xz);
-
+    if (rc != 0) DeleteFileW(pkgs);
     free(T.buf);
     free(T.records);
-    log_msg(L"prefetch: OK -> %s", out_dir);
-    return 0;
+    free(installed.buf);
+    free(installed.records);
+    free(iso.buf);
+    free(iso.records);
+    if (rc == 0) log_msg(L"prefetch: OK -> %s", out_dir);
+    return rc;
 }
