@@ -1971,7 +1971,8 @@ static int generate_vhdx_manifest_ubuntu(const wchar_t *manifest_path,
  * Output buffers should be at least 64 wchars each. */
 static int detect_iso_kernel(const wchar_t *iso_path,
                              wchar_t *codename_out, size_t codename_cap,
-                             wchar_t *kver_out, size_t kver_cap)
+                             wchar_t *kver_out, size_t kver_cap,
+                             HANDLE *iso_out, wchar_t *drive_out)
 {
     HANDLE iso_handle = INVALID_HANDLE_VALUE;
     DWORD cdrom_before, cdrom_after, newly;
@@ -1980,6 +1981,8 @@ static int detect_iso_kernel(const wchar_t *iso_path,
 
     codename_out[0] = 0;
     kver_out[0]     = 0;
+    *iso_out = INVALID_HANDLE_VALUE;
+    *drive_out = 0;
 
     /* Snapshot current CD-ROM drive letters before mount. */
     cdrom_before = 0;
@@ -2128,6 +2131,9 @@ static int detect_iso_kernel(const wchar_t *iso_path,
     }
 
     asb_log(L"detect_iso_kernel: codename=%s kver=%s", codename_out, kver_out);
+    *iso_out = iso_handle;
+    *drive_out = iso_drive;
+    iso_handle = INVALID_HANDLE_VALUE;
     rc = 0;
 
 cleanup:
@@ -2383,17 +2389,22 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
            Needs (codename, kernel) detected from the ISO. */
         asb_log(L"Prefetch 2/3: apt build-deps closure...");
         wchar_t codename[64] = L"", kver[64] = L"";
+        HANDLE iso_handle = INVALID_HANDLE_VALUE;
+        wchar_t iso_drive = 0;
         if (detect_iso_kernel(args->config.image_path,
                               codename, ARRAYSIZE(codename),
-                              kver,     ARRAYSIZE(kver)) == 0) {
+                              kver,     ARRAYSIZE(kver),
+                              &iso_handle, &iso_drive) == 0) {
             wchar_t apt_out[MAX_PATH];
             swprintf_s(apt_out, MAX_PATH, L"%s\\local-apt-extras", extras);
             swprintf_s(args_buf, 2048,
                 L"--prefetch-build-deps --codename \"%s\" --kernel \"%s\" "
-                L"--out-dir \"%s\"",
-                codename, kver, apt_out);
+                L"--out-dir \"%s\" --iso-root \"%c:\"",
+                codename, kver, apt_out, iso_drive);
             if (spawn_iso_patch_prefetch(args_buf) != 0)
                 asb_log(L"WARN: prefetch-build-deps failed");
+            DetachVirtualDisk(iso_handle, DETACH_VIRTUAL_DISK_FLAG_NONE, 0);
+            CloseHandle(iso_handle);
         } else {
             asb_log(L"WARN: could not detect ISO kernel — skipping build-deps");
         }
