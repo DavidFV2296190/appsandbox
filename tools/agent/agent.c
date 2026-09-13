@@ -613,8 +613,8 @@ static DWORD WINAPI gpu_copy_thread(LPVOID param)
                 rc = P9_ERR_IO;
         } else if (strcmp(si->share_name, "AppSandbox.Nvidia") == 0) {
             const P9CopyOptions options = {
-                FALSE, NULL, "AppSandbox-NVIDIA-VK-GL-shim.dll;AppSandbox-NVIDIA-VK-GL-shim32.dll;"
-                             "AppSandbox-NVIDIA-DLSS-shim.dll"
+                FALSE, NULL, "appsandbox-nvidia-vk-gl-shim.dll;appsandbox-nvidia-vk-gl-shim32.dll;"
+                             "appsandbox-nvidia-dlss-shim.dll"
             };
             rc = p9_copy_share_ex(50001, si->share_name, dest_wide,
                                  si->filter[0] ? si->filter : NULL,

@@ -40,7 +40,7 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
     <SolutionDir Condition="'$(SolutionDir)'=='' Or '$(SolutionDir)'=='*Undefined*'">$(MSBuildThisFileDirectory)..\..\</SolutionDir>
-    <TargetName>AppSandbox-NVIDIA-DLSS-shim</TargetName>
+    <TargetName>appsandbox-nvidia-dlss-shim</TargetName>
     <DisableFastUpToDateCheck>true</DisableFastUpToDateCheck>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Platform)'=='x64'">

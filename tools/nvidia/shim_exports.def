@@ -1,4 +1,4 @@
-LIBRARY AppSandbox-NVIDIA-VK-GL-shim
+LIBRARY appsandbox-nvidia-vk-gl-shim
 EXPORTS
     GlmfBeginGlsBlock=appsandbox-opengl32.GlmfBeginGlsBlock @1
     GlmfCloseMetaFile=appsandbox-opengl32.GlmfCloseMetaFile @2

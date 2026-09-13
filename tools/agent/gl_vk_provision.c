@@ -576,7 +576,7 @@ static BOOL provision_nvapi(const wchar_t *native_dir, const wchar_t *sys,
     wchar_t payload[MAX_PATH], original[MAX_PATH], other[MAX_PATH], backup[MAX_PATH], runtime[MAX_PATH];
     UINT i;
 
-    if (!count || swprintf_s(payload, MAX_PATH, L"%s\\AppSandbox-NVIDIA-DLSS-shim.dll", native_dir) < 0 ||
+    if (!count || swprintf_s(payload, MAX_PATH, L"%s\\appsandbox-nvidia-dlss-shim.dll", native_dir) < 0 ||
         swprintf_s(original, MAX_PATH, L"%s\\nvapi64.dll", packages[0]) < 0 ||
         swprintf_s(runtime, MAX_PATH, L"%s\\nvapi64.dll", sys) < 0 ||
         swprintf_s(backup, MAX_PATH, L"%s\\appsandbox-nvapi64.dll", sys) < 0)
@@ -838,7 +838,7 @@ static BOOL provision_gl_vk_for_arch(const wchar_t *dir, const wchar_t *native_d
     {
         wchar_t manifests[32][MAX_PATH], backend[MAX_PATH], previous[MAX_PATH];
         const wchar_t *payload = machine == IMAGE_FILE_MACHINE_I386 ?
-            L"AppSandbox-NVIDIA-VK-GL-shim32.dll" : L"AppSandbox-NVIDIA-VK-GL-shim.dll";
+            L"appsandbox-nvidia-vk-gl-shim32.dll" : L"appsandbox-nvidia-vk-gl-shim.dll";
         const wchar_t *manifest = machine == IMAGE_FILE_MACHINE_I386 ?
             L"nv-vk32.json" : L"nv-vk64.json";
         UINT count = 0, i;
@@ -922,7 +922,7 @@ BOOL gl_vk_provision_runtime(const wchar_t *dir, const wchar_t *native_dir,
     if (GetSystemWow64DirectoryW(wow, MAX_PATH)) {
         payload[0] = 0;
         if (native_dir && native_dir[0])
-            swprintf_s(payload, MAX_PATH, L"%s\\AppSandbox-NVIDIA-VK-GL-shim32.dll", native_dir);
+            swprintf_s(payload, MAX_PATH, L"%s\\appsandbox-nvidia-vk-gl-shim32.dll", native_dir);
         swprintf_s(runtime, MAX_PATH, L"%s\\opengl32.dll", wow);
         if (system_runtime ||
             (payload[0] && GetFileAttributesW(payload) != INVALID_FILE_ATTRIBUTES) ||
@@ -946,7 +946,7 @@ BOOL nvidia_dlss_provision(const wchar_t *native_dir)
     UINT count, i, length;
 
     if (!native_dir || !native_dir[0]) return TRUE;
-    if (swprintf_s(payload, MAX_PATH, L"%s\\AppSandbox-NVIDIA-DLSS-shim.dll", native_dir) < 0)
+    if (swprintf_s(payload, MAX_PATH, L"%s\\appsandbox-nvidia-dlss-shim.dll", native_dir) < 0)
         return FALSE;
     if (GetFileAttributesW(payload) == INVALID_FILE_ATTRIBUTES) return TRUE;
     length = GetSystemDirectoryW(sys, MAX_PATH);

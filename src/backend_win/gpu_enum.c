@@ -604,8 +604,8 @@ BOOL gpu_append_nvidia_graphics_shim_share(const GpuList *gpu_list, GpuDriverSha
 {
 #if defined(_M_X64)
     static const wchar_t *const additional[] = {
-        L"AppSandbox-NVIDIA-VK-GL-shim32.dll",
-        L"AppSandbox-NVIDIA-DLSS-shim.dll"
+        L"appsandbox-nvidia-vk-gl-shim32.dll",
+        L"appsandbox-nvidia-dlss-shim.dll"
     };
     wchar_t exe[MAX_PATH], path[MAX_PATH], file[MAX_PATH], *slash;
     GpuDriverShare *share;
@@ -629,14 +629,14 @@ BOOL gpu_append_nvidia_graphics_shim_share(const GpuList *gpu_list, GpuDriverSha
     slash = wcsrchr(exe, L'\\');
     if (!slash) return FALSE;
     *slash = 0;
-    if (wcslen(exe) + wcslen(L"\\resources\\nvidia\\AppSandbox-NVIDIA-VK-GL-shim32.dll") >= MAX_PATH)
+    if (wcslen(exe) + wcslen(L"\\resources\\nvidia\\appsandbox-nvidia-vk-gl-shim32.dll") >= MAX_PATH)
         return FALSE;
     swprintf_s(path, MAX_PATH, L"%s\\resources\\nvidia", exe);
-    swprintf_s(file, MAX_PATH, L"%s\\AppSandbox-NVIDIA-VK-GL-shim.dll", path);
+    swprintf_s(file, MAX_PATH, L"%s\\appsandbox-nvidia-vk-gl-shim.dll", path);
     attributes = GetFileAttributesW(file);
     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
         swprintf_s(path, MAX_PATH, L"%s\\nvidia", exe);
-        swprintf_s(file, MAX_PATH, L"%s\\AppSandbox-NVIDIA-VK-GL-shim.dll", path);
+        swprintf_s(file, MAX_PATH, L"%s\\appsandbox-nvidia-vk-gl-shim.dll", path);
         attributes = GetFileAttributesW(file);
     }
     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY))
@@ -646,7 +646,7 @@ BOOL gpu_append_nvidia_graphics_shim_share(const GpuList *gpu_list, GpuDriverSha
     wcscpy_s(share->share_name, 128, L"AppSandbox.Nvidia");
     wcscpy_s(share->host_path, MAX_PATH, path);
     wcscpy_s(share->guest_path, MAX_PATH, L"C:\\Windows\\AppSandbox\\nvidia");
-    wcscpy_s(share->file_filter, 4096, L"AppSandbox-NVIDIA-VK-GL-shim.dll");
+    wcscpy_s(share->file_filter, 4096, L"appsandbox-nvidia-vk-gl-shim.dll");
     for (i = 0; i < ARRAYSIZE(additional); i++) {
         swprintf_s(file, MAX_PATH, L"%s\\%s", path, additional[i]);
         attributes = GetFileAttributesW(file);

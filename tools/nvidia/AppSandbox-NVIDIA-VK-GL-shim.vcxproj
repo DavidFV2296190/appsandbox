@@ -48,7 +48,7 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
     <SolutionDir Condition="'$(SolutionDir)'=='' Or '$(SolutionDir)'=='*Undefined*'">$(MSBuildThisFileDirectory)..\..\</SolutionDir>
-    <TargetName>AppSandbox-NVIDIA-VK-GL-shim</TargetName>
+    <TargetName>appsandbox-nvidia-vk-gl-shim</TargetName>
     <NvidiaMachine>$(Platform)</NvidiaMachine>
     <NvidiaExports>shim_exports.def</NvidiaExports>
     <DisableFastUpToDateCheck>true</DisableFastUpToDateCheck>
@@ -62,7 +62,7 @@
     <IntDir>$(SolutionDir)obj\nvidia\$(Configuration)-ARM64\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Platform)'=='Win32'">
-    <TargetName>AppSandbox-NVIDIA-VK-GL-shim32</TargetName>
+    <TargetName>appsandbox-nvidia-vk-gl-shim32</TargetName>
     <NvidiaMachine>X86</NvidiaMachine>
     <NvidiaExports>shim_exports_x86.def</NvidiaExports>
     <OutDir>$(SolutionDir)bin\$(Configuration)\nvidia\</OutDir>
