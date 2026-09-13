@@ -544,6 +544,8 @@ typedef struct slot {
     uint32_t     uid, gid, mtime, rdev;
     uint64_t     size;
     void        *data;
+    void        *capability;
+    size_t       capability_size;
     char        *symlink_target;
     uint32_t     symlink_target_size;
     uint64_t     mem_bytes;
@@ -707,6 +709,14 @@ static DWORD WINAPI decompress_worker(LPVOID arg)
         }
         s->size = sz;
         s->mem_bytes += sz;
+        if (sqfs_read_capability(p->sq, &e, &s->capability, &s->capability_size) != 0) {
+            log_err(L"sqfs_read_capability failed");
+            free(s->data); free(s->path); free(s);
+            InterlockedIncrement((volatile LONG *)&p->n_errors);
+            free(w);
+            continue;
+        }
+        s->mem_bytes += s->capability_size;
         pipeline_push(p, s);
         free(w);
     }
@@ -783,6 +793,9 @@ static DWORD WINAPI consumer_thread(LPVOID arg)
         case SQFS_REG_TYPE: case SQFS_EREG_TYPE:
             rc = ext4_writer_add_file(p->ew, s->path, s->mode, s->uid, s->gid, s->mtime,
                                       s->data, s->size);
+            if (rc == 0 && s->capability_size)
+                rc = ext4_writer_set_capability(p->ew, s->path,
+                                                s->capability, s->capability_size);
             if (rc == 0) { p->n_files++; p->bytes_total += s->size; }
             /* Mirror unicode.pf2 into /boot/grub/fonts/ (loadfont's default
              * search path). */
@@ -832,6 +845,7 @@ static DWORD WINAPI consumer_thread(LPVOID arg)
 
         free(s->path);
         free(s->data);
+        free(s->capability);
         free(s->symlink_target);
         free(s);
     }
@@ -1281,6 +1295,7 @@ static void plant_firstboot_service(ext4_writer_t *ew)
         "# in one shot — saves repeated apt overhead and avoids the\n"
         "# install-build-deps-after-trying-to-build ordering bug.\n"
         "echo \"==== STEP 7.4: apt sources + install all build tools ====\"\n"
+        "rm -f /etc/apt/sources.list.d/cdrom.sources\n"
         "APT_SOURCES_DIR=/etc/apt/appsandbox-sources.list.d\n"
         "install -d \"$APT_SOURCES_DIR\"\n"
         "if [ -d /opt/appsandbox/local-apt/dists ]; then\n"
