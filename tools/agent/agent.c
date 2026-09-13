@@ -613,7 +613,8 @@ static DWORD WINAPI gpu_copy_thread(LPVOID param)
                 rc = P9_ERR_IO;
         } else if (strcmp(si->share_name, "AppSandbox.Nvidia") == 0) {
             const P9CopyOptions options = {
-                FALSE, NULL, "AppSandbox-NVIDIA-VK-GL-shim.dll;AppSandbox-NVIDIA-VK-GL-shim32.dll"
+                FALSE, NULL, "AppSandbox-NVIDIA-VK-GL-shim.dll;AppSandbox-NVIDIA-VK-GL-shim32.dll;"
+                             "AppSandbox-NVIDIA-DLSS-shim.dll"
             };
             rc = p9_copy_share_ex(50001, si->share_name, dest_wide,
                                  si->filter[0] ? si->filter : NULL,
@@ -657,6 +658,8 @@ static DWORD WINAPI gpu_copy_thread(LPVOID param)
 
     if (failed_shares == 0 && (gl_dir[0] || native_dir[0] || gpu_prefers_system_opengl()))
         gl_provision(gl_dir, native_dir);
+    if (failed_shares == 0 && !nvidia_dlss_provision(native_dir))
+        failed_shares++;
 
     /* Send final result to host */
     if (failed_shares == 0) {

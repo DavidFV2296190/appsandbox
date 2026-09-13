@@ -600,9 +600,13 @@ BOOL gpu_append_nvidia_drs_share(const GpuList *gpu_list, GpuDriverShareList *li
     return TRUE;
 }
 
-BOOL gpu_append_nvidia_gl_vk_shim_share(const GpuList *gpu_list, GpuDriverShareList *list)
+BOOL gpu_append_nvidia_graphics_shim_share(const GpuList *gpu_list, GpuDriverShareList *list)
 {
 #if defined(_M_X64)
+    static const wchar_t *const additional[] = {
+        L"AppSandbox-NVIDIA-VK-GL-shim32.dll",
+        L"AppSandbox-NVIDIA-DLSS-shim.dll"
+    };
     wchar_t exe[MAX_PATH], path[MAX_PATH], file[MAX_PATH], *slash;
     GpuDriverShare *share;
     DWORD length, attributes;
@@ -643,10 +647,14 @@ BOOL gpu_append_nvidia_gl_vk_shim_share(const GpuList *gpu_list, GpuDriverShareL
     wcscpy_s(share->host_path, MAX_PATH, path);
     wcscpy_s(share->guest_path, MAX_PATH, L"C:\\Windows\\AppSandbox\\nvidia");
     wcscpy_s(share->file_filter, 4096, L"AppSandbox-NVIDIA-VK-GL-shim.dll");
-    swprintf_s(file, MAX_PATH, L"%s\\AppSandbox-NVIDIA-VK-GL-shim32.dll", path);
-    attributes = GetFileAttributesW(file);
-    if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY))
-        wcscat_s(share->file_filter, 4096, L";AppSandbox-NVIDIA-VK-GL-shim32.dll");
+    for (i = 0; i < ARRAYSIZE(additional); i++) {
+        swprintf_s(file, MAX_PATH, L"%s\\%s", path, additional[i]);
+        attributes = GetFileAttributesW(file);
+        if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            wcscat_s(share->file_filter, 4096, L";");
+            wcscat_s(share->file_filter, 4096, additional[i]);
+        }
+    }
     list->count++;
     return TRUE;
 #else
