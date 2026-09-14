@@ -7,6 +7,8 @@
 #include <wincrypt.h>
 #include <mscat.h>
 #include <aclapi.h>
+#include <winioctl.h>
+#include <winternl.h>
 #pragma warning(pop)
 #include <stdio.h>
 #include <stdlib.h>
@@ -290,7 +292,7 @@ static BOOL grant_system_file_control(const wchar_t *path)
 }
 
 #if defined(_M_X64)
-static BOOL validate_opengl_dll(const wchar_t *path, WORD machine, BOOL native)
+static BOOL validate_dll_export(const wchar_t *path, WORD machine, const char *required_export)
 {
     HMODULE module = LoadLibraryExW(path, NULL, LOAD_LIBRARY_AS_IMAGE_RESOURCE);
     BYTE *base;
@@ -298,6 +300,7 @@ static BOOL validate_opengl_dll(const wchar_t *path, WORD machine, BOOL native)
     IMAGE_DATA_DIRECTORY directory;
     IMAGE_EXPORT_DIRECTORY *exports;
     DWORD *names, i, size;
+    size_t export_length = required_export ? strlen(required_export) + 1 : 0;
     BOOL found = FALSE;
 
     if (!module) return FALSE;
@@ -314,7 +317,7 @@ static BOOL validate_opengl_dll(const wchar_t *path, WORD machine, BOOL native)
         size = nt32->OptionalHeader.SizeOfImage;
         directory = nt32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
     } else goto done;
-    if (!native) { found = TRUE; goto done; }
+    if (!required_export) { found = TRUE; goto done; }
     if (!directory.VirtualAddress || size < sizeof(*exports) ||
         directory.VirtualAddress > size - sizeof(*exports)) goto done;
     exports = (IMAGE_EXPORT_DIRECTORY *)(base + directory.VirtualAddress);
@@ -322,8 +325,8 @@ static BOOL validate_opengl_dll(const wchar_t *path, WORD machine, BOOL native)
         exports->AddressOfNames > size - exports->NumberOfNames * sizeof(DWORD)) goto done;
     names = (DWORD *)(base + exports->AddressOfNames);
     for (i = 0; i < exports->NumberOfNames; i++) {
-        if (names[i] <= size - sizeof("appsandbox_nvidia") &&
-            !memcmp(base + names[i], "appsandbox_nvidia", sizeof("appsandbox_nvidia"))) {
+        if (export_length <= size && names[i] <= size - export_length &&
+            !memcmp(base + names[i], required_export, export_length)) {
             found = TRUE;
             break;
         }
@@ -333,8 +336,13 @@ done:
     return found;
 }
 
-static UINT find_nvidia_vulkan_manifests(wchar_t paths[32][MAX_PATH], const wchar_t *sys,
-                             const wchar_t *manifest)
+static BOOL validate_opengl_dll(const wchar_t *path, WORD machine, BOOL native)
+{
+    return validate_dll_export(path, machine, native ? "appsandbox_nvidia" : NULL);
+}
+
+static UINT find_nvidia_driver_files(wchar_t paths[32][MAX_PATH], const wchar_t *sys,
+                                     const wchar_t *filename)
 {
     typedef NTSTATUS (APIENTRY *EnumAdaptersFn)(const D3DKMT_ENUMADAPTERS2 *);
     typedef NTSTATUS (APIENTRY *QueryAdapterFn)(const D3DKMT_QUERYADAPTERINFO *);
@@ -401,11 +409,11 @@ static UINT find_nvidia_vulkan_manifests(wchar_t paths[32][MAX_PATH], const wcha
         if (!slash || _wcsicmp(slash + 1, L"nvoglv64.dll") ||
             GetFileAttributesW(driver) == INVALID_FILE_ATTRIBUTES) goto next;
         *slash = 0;
-        if (!_wcsicmp(manifest, L"nv-vk32.json")) {
+        if (!_wcsicmp(filename, L"nv-vk32.json")) {
             swprintf_s(path, MAX_PATH, L"%s\\nvoglv32.dll", driver);
             if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) goto next;
         }
-        swprintf_s(path, MAX_PATH, L"%s\\%s", driver, manifest);
+        swprintf_s(path, MAX_PATH, L"%s\\%s", driver, filename);
         if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) goto next;
         for (j = 0; j < count; j++)
             if (!_wcsicmp(paths[j], path)) break;
@@ -424,6 +432,167 @@ done:
     free(adapters);
     FreeLibrary(gdi);
     return count;
+}
+
+typedef struct {
+    DWORD tag;
+    USHORT data_length, reserved;
+    USHORT substitute_offset, substitute_length, print_offset, print_length;
+    wchar_t paths[(MAX_PATH + 4) * 2];
+} NvidiaNgxJunction;
+
+static HANDLE create_ngx_junction_directory(const wchar_t *path, BOOL *created)
+{
+    typedef NTSTATUS (NTAPI *CreateFileFn)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
+        PIO_STATUS_BLOCK, PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+    CreateFileFn create;
+    HANDLE directory = INVALID_HANDLE_VALUE, token;
+    TOKEN_PRIVILEGES privileges = { 1 }, previous = { 0 };
+    DWORD previous_size = sizeof(previous), error;
+    wchar_t native[MAX_PATH + 4];
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES attributes = { sizeof(attributes) };
+    IO_STATUS_BLOCK status;
+
+    *created = CreateDirectoryW(path, NULL);
+    if (*created) {
+        directory = CreateFileW(path, GENERIC_WRITE | DELETE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        if (directory != INVALID_HANDLE_VALUE) return directory;
+    }
+    error = GetLastError();
+    if (error != ERROR_ACCESS_DENIED) return INVALID_HANDLE_VALUE;
+    create = (CreateFileFn)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCreateFile");
+    if (!create || swprintf_s(native, ARRAYSIZE(native), L"\\??\\%s", path) < 0 ||
+        !OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                          &token)) return INVALID_HANDLE_VALUE;
+    if (!LookupPrivilegeValueW(NULL, SE_RESTORE_NAME, &privileges.Privileges[0].Luid)) {
+        CloseHandle(token);
+        return INVALID_HANDLE_VALUE;
+    }
+    privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    SetLastError(ERROR_SUCCESS);
+    if (AdjustTokenPrivileges(token, FALSE, &privileges, sizeof(previous),
+                               &previous, &previous_size) && GetLastError() == ERROR_SUCCESS) {
+        name.Buffer = native;
+        name.Length = (USHORT)(wcslen(native) * sizeof(wchar_t));
+        name.MaximumLength = (USHORT)(name.Length + sizeof(wchar_t));
+        attributes.ObjectName = &name;
+        attributes.Attributes = OBJ_CASE_INSENSITIVE;
+        if (create(&directory, GENERIC_WRITE | DELETE | SYNCHRONIZE, &attributes, &status,
+            NULL, FILE_ATTRIBUTE_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            *created ? FILE_OPEN : FILE_CREATE,
+            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT |
+            FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT, NULL, 0) >= 0)
+            *created = TRUE;
+        else
+            directory = INVALID_HANDLE_VALUE;
+    }
+    if (previous.PrivilegeCount)
+        AdjustTokenPrivileges(token, FALSE, &previous, 0, NULL, NULL);
+    CloseHandle(token);
+    return directory;
+}
+
+static BOOL nvidia_ngx_junction(const wchar_t *sys, const wchar_t *package)
+{
+    wchar_t host_prefix[MAX_PATH], driver_prefix[MAX_PATH], target[MAX_PATH];
+    wchar_t link[MAX_PATH], file[MAX_PATH], native[MAX_PATH + 4];
+    const wchar_t *leaf;
+    NvidiaNgxJunction reparse = { 0 };
+    HANDLE directory;
+    DWORD attributes, bytes;
+    size_t target_length, native_length;
+    BOOL created = FALSE, result;
+
+    if (swprintf_s(host_prefix, MAX_PATH, L"%s\\HostDriverStore\\FileRepository\\", sys) < 0 ||
+        swprintf_s(driver_prefix, MAX_PATH, L"%s\\DriverStore\\FileRepository\\", sys) < 0)
+        return FALSE;
+    if (!_wcsnicmp(package, host_prefix, wcslen(host_prefix)))
+        leaf = package + wcslen(host_prefix);
+    else if (!_wcsnicmp(package, driver_prefix, wcslen(driver_prefix)))
+        leaf = package + wcslen(driver_prefix);
+    else return FALSE;
+    if (!leaf[0] || !wcscmp(leaf, L".") || !wcscmp(leaf, L"..") || wcspbrk(leaf, L"\\/:") ||
+        swprintf_s(target, MAX_PATH, L"%s%s", host_prefix, leaf) < 0 ||
+        swprintf_s(link, MAX_PATH, L"%s%s", driver_prefix, leaf) < 0 ||
+        swprintf_s(native, ARRAYSIZE(native), L"\\??\\%s", target) < 0)
+        return FALSE;
+    attributes = GetFileAttributesW(link);
+    if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        wchar_t host_file[MAX_PATH];
+        if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+            swprintf_s(file, MAX_PATH, L"%s\\_nvngx.dll", link) < 0 ||
+            swprintf_s(host_file, MAX_PATH, L"%s\\_nvngx.dll", target) < 0 ||
+            !validate_dll_export(file, IMAGE_FILE_MACHINE_AMD64, NULL)) return FALSE;
+        return GetFileAttributesW(host_file) == INVALID_FILE_ATTRIBUTES || files_equal(file, host_file);
+    }
+    if (swprintf_s(file, MAX_PATH, L"%s\\_nvngx.dll", target) < 0 ||
+        !validate_dll_export(file, IMAGE_FILE_MACHINE_AMD64, NULL)) return FALSE;
+    native_length = wcslen(native) * sizeof(wchar_t);
+    target_length = wcslen(target) * sizeof(wchar_t);
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        directory = CreateFileW(link, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        if (directory == INVALID_HANDLE_VALUE) return FALSE;
+        result = DeviceIoControl(directory, FSCTL_GET_REPARSE_POINT, NULL, 0,
+                                  &reparse, sizeof(reparse), &bytes, NULL);
+        CloseHandle(directory);
+        return result && bytes >= (DWORD)FIELD_OFFSET(NvidiaNgxJunction, paths) &&
+            reparse.tag == IO_REPARSE_TAG_MOUNT_POINT &&
+            reparse.substitute_offset % sizeof(wchar_t) == 0 &&
+            reparse.substitute_length == native_length &&
+            (DWORD)reparse.substitute_offset + reparse.substitute_length <=
+                bytes - (DWORD)FIELD_OFFSET(NvidiaNgxJunction, paths) &&
+            !_wcsnicmp(reparse.paths + reparse.substitute_offset / sizeof(wchar_t),
+                       native, native_length / sizeof(wchar_t));
+    }
+    directory = create_ngx_junction_directory(link, &created);
+    if (directory == INVALID_HANDLE_VALUE) {
+        if (created) RemoveDirectoryW(link);
+        return FALSE;
+    }
+    reparse.tag = IO_REPARSE_TAG_MOUNT_POINT;
+    reparse.substitute_length = (USHORT)native_length;
+    reparse.print_offset = (USHORT)(native_length + sizeof(wchar_t));
+    reparse.print_length = (USHORT)target_length;
+    reparse.data_length = (USHORT)(8 + native_length + target_length + 2 * sizeof(wchar_t));
+    memcpy(reparse.paths, native, native_length + sizeof(wchar_t));
+    memcpy((BYTE *)reparse.paths + reparse.print_offset, target, target_length + sizeof(wchar_t));
+    result = DeviceIoControl(directory, FSCTL_SET_REPARSE_POINT, &reparse,
+                              reparse.data_length + 8, NULL, 0, &bytes, NULL);
+    if (!result) {
+        FILE_DISPOSITION_INFO disposition = { TRUE };
+        SetFileInformationByHandle(directory, FileDispositionInfo, &disposition, sizeof(disposition));
+    }
+    CloseHandle(directory);
+    return result;
+}
+
+static BOOL provision_nvapi(const wchar_t *native_dir, const wchar_t *sys,
+                            wchar_t packages[32][MAX_PATH], UINT count)
+{
+    wchar_t payload[MAX_PATH], original[MAX_PATH], other[MAX_PATH], backup[MAX_PATH], runtime[MAX_PATH];
+    UINT i;
+
+    if (!count || swprintf_s(payload, MAX_PATH, L"%s\\appsandbox-nvidia-dlss-shim.dll", native_dir) < 0 ||
+        swprintf_s(original, MAX_PATH, L"%s\\nvapi64.dll", packages[0]) < 0 ||
+        swprintf_s(runtime, MAX_PATH, L"%s\\nvapi64.dll", sys) < 0 ||
+        swprintf_s(backup, MAX_PATH, L"%s\\appsandbox-nvapi64.dll", sys) < 0)
+        return FALSE;
+    if (!validate_dll_export(payload, IMAGE_FILE_MACHINE_AMD64, "appsandbox_nvapi") ||
+        !validate_dll_export(payload, IMAGE_FILE_MACHINE_AMD64, "nvapi_QueryInterface") ||
+        !validate_dll_export(original, IMAGE_FILE_MACHINE_AMD64, "nvapi_QueryInterface") ||
+        validate_dll_export(original, IMAGE_FILE_MACHINE_AMD64, "appsandbox_nvapi")) return FALSE;
+    for (i = 1; i < count; i++) {
+        if (swprintf_s(other, MAX_PATH, L"%s\\nvapi64.dll", packages[i]) < 0 ||
+            !files_equal(original, other)) return FALSE;
+    }
+    if (!replace_file(original, backup)) return FALSE;
+    return files_equal(payload, runtime) ||
+        ((GetFileAttributesW(runtime) == INVALID_FILE_ATTRIBUTES || grant_system_file_control(runtime)) &&
+         replace_file(payload, runtime));
 }
 
 static const char *json_skip_whitespace(const char *p)
@@ -669,7 +838,7 @@ static BOOL provision_gl_vk_for_arch(const wchar_t *dir, const wchar_t *native_d
     {
         wchar_t manifests[32][MAX_PATH], backend[MAX_PATH], previous[MAX_PATH];
         const wchar_t *payload = machine == IMAGE_FILE_MACHINE_I386 ?
-            L"AppSandbox-NVIDIA-VK-GL-shim32.dll" : L"AppSandbox-NVIDIA-VK-GL-shim.dll";
+            L"appsandbox-nvidia-vk-gl-shim32.dll" : L"appsandbox-nvidia-vk-gl-shim.dll";
         const wchar_t *manifest = machine == IMAGE_FILE_MACHINE_I386 ?
             L"nv-vk32.json" : L"nv-vk64.json";
         UINT count = 0, i;
@@ -677,7 +846,7 @@ static BOOL provision_gl_vk_for_arch(const wchar_t *dir, const wchar_t *native_d
         if (native_dir && native_dir[0])
             swprintf_s(src, MAX_PATH, L"%s\\%s", native_dir, payload);
         if (src[0] && validate_opengl_dll(src, machine, TRUE) &&
-            (count = find_nvidia_vulkan_manifests(manifests, driver_sys, manifest)) != 0 &&
+            (count = find_nvidia_driver_files(manifests, driver_sys, manifest)) != 0 &&
             is_microsoft_opengl(backup) && validate_opengl_dll(backup, machine, FALSE)) {
             swprintf_s(backend, MAX_PATH, L"%s\\appsandbox-opengl32.dll", sys);
             if (replace_file(backup, backend) &&
@@ -753,7 +922,7 @@ BOOL gl_vk_provision_runtime(const wchar_t *dir, const wchar_t *native_dir,
     if (GetSystemWow64DirectoryW(wow, MAX_PATH)) {
         payload[0] = 0;
         if (native_dir && native_dir[0])
-            swprintf_s(payload, MAX_PATH, L"%s\\AppSandbox-NVIDIA-VK-GL-shim32.dll", native_dir);
+            swprintf_s(payload, MAX_PATH, L"%s\\appsandbox-nvidia-vk-gl-shim32.dll", native_dir);
         swprintf_s(runtime, MAX_PATH, L"%s\\opengl32.dll", wow);
         if (system_runtime ||
             (payload[0] && GetFileAttributesW(payload) != INVALID_FILE_ATTRIBUTES) ||
@@ -767,5 +936,32 @@ BOOL gl_vk_provision_runtime(const wchar_t *dir, const wchar_t *native_dir,
 #else
     return provision_gl_vk_for_arch(dir, native_dir, sys, sys, IMAGE_FILE_MACHINE_ARM64, FALSE,
                               native_runtime);
+#endif
+}
+
+BOOL nvidia_dlss_provision(const wchar_t *native_dir)
+{
+#if defined(_M_X64)
+    wchar_t sys[MAX_PATH], payload[MAX_PATH], packages[32][MAX_PATH];
+    UINT count, i, length;
+
+    if (!native_dir || !native_dir[0]) return TRUE;
+    if (swprintf_s(payload, MAX_PATH, L"%s\\appsandbox-nvidia-dlss-shim.dll", native_dir) < 0)
+        return FALSE;
+    if (GetFileAttributesW(payload) == INVALID_FILE_ATTRIBUTES) return TRUE;
+    length = GetSystemDirectoryW(sys, MAX_PATH);
+    if (!length || length >= MAX_PATH) return FALSE;
+    count = find_nvidia_driver_files(packages, sys, L"_nvngx.dll");
+    if (!count) return TRUE;
+    for (i = 0; i < count; i++) {
+        wchar_t *slash = wcsrchr(packages[i], L'\\');
+        if (!slash) return FALSE;
+        *slash = 0;
+        if (!nvidia_ngx_junction(sys, packages[i])) return FALSE;
+    }
+    return provision_nvapi(native_dir, sys, packages, count);
+#else
+    (void)native_dir;
+    return TRUE;
 #endif
 }

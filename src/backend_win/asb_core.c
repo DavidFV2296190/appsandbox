@@ -1052,7 +1052,7 @@ static DWORD WINAPI start_vm_thread(LPVOID param)
         else if (_wcsicmp(args->config.os_type, L"Windows") == 0) {
             gpu_append_amd_gl_vk_driver_shares(&g_gpu_list, &args->config.gpu_shares);
             gpu_append_nvidia_drs_share(&g_gpu_list, &args->config.gpu_shares);
-            gpu_append_nvidia_gl_vk_shim_share(&g_gpu_list, &args->config.gpu_shares);
+            gpu_append_nvidia_graphics_shim_share(&g_gpu_list, &args->config.gpu_shares);
             prepare_gl_layers_share(&args->config.gpu_shares);
         }
     }
@@ -3210,7 +3210,7 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
         else if (_wcsicmp(cfg.os_type, L"Windows") == 0) {
             gpu_append_amd_gl_vk_driver_shares(&g_gpu_list, &cfg.gpu_shares);
             gpu_append_nvidia_drs_share(&g_gpu_list, &cfg.gpu_shares);
-            gpu_append_nvidia_gl_vk_shim_share(&g_gpu_list, &cfg.gpu_shares);
+            gpu_append_nvidia_graphics_shim_share(&g_gpu_list, &cfg.gpu_shares);
             prepare_gl_layers_share(&cfg.gpu_shares);
         }
     }
