@@ -373,3 +373,4 @@ EXPORTS
     vk_icdGetPhysicalDeviceProcAddr
     vk_icdEnumerateAdapterPhysicalDevices
     appsandbox_nvidia
+    appsandbox_nvidia_adapter_luid

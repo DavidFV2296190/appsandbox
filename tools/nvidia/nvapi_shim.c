@@ -102,13 +102,29 @@ static void capture_device_identity(IUnknown *device)
 
 static BOOL current_device_luid(LUID *luid)
 {
+    typedef BOOL (WINAPI *AdapterLuidFn)(LUID *);
+    wchar_t path[MAX_PATH];
+    HMODULE module;
+    UINT length;
     BOOL found;
 
     AcquireSRWLockShared(&g_identity_lock);
     found = g_have_device_luid;
     if (found) *luid = g_device_luid;
     ReleaseSRWLockShared(&g_identity_lock);
-    return found || find_nvidia_adapter(NULL, luid);
+    if (found) return TRUE;
+
+    length = GetSystemDirectoryW(path, ARRAYSIZE(path));
+    if (length && length + ARRAYSIZE(L"\\opengl32.dll") <= ARRAYSIZE(path)) {
+        wcscat_s(path, ARRAYSIZE(path), L"\\opengl32.dll");
+        if (GetModuleHandleExW(0, path, &module)) {
+            AdapterLuidFn get_luid = (AdapterLuidFn)GetProcAddress(module, "appsandbox_nvidia_adapter_luid");
+            found = get_luid && get_luid(luid) && find_nvidia_adapter(luid, NULL);
+            FreeLibrary(module);
+            if (found) return TRUE;
+        }
+    }
+    return find_nvidia_adapter(NULL, luid);
 }
 
 static int __cdecl logical_gpu_info_hook(void *gpu, LogicalGpuInfo *info)

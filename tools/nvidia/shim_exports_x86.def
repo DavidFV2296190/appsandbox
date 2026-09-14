@@ -373,3 +373,4 @@ EXPORTS
     vk_icdGetPhysicalDeviceProcAddr=vk_icdGetPhysicalDeviceProcAddr@8
     vk_icdEnumerateAdapterPhysicalDevices=vk_icdEnumerateAdapterPhysicalDevices@20
     appsandbox_nvidia=appsandbox_nvidia@0
+    appsandbox_nvidia_adapter_luid=appsandbox_nvidia_adapter_luid@4

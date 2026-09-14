@@ -462,6 +462,13 @@ BOOL nvidia_install_adapter_hooks(void)
     return g_ready;
 }
 
+BOOL WINAPI appsandbox_nvidia_adapter_luid(LUID *luid)
+{
+    if (!luid || !InterlockedCompareExchange(&g_hooks_enabled, 0, 0)) return FALSE;
+    *luid = g_luid;
+    return TRUE;
+}
+
 BOOL nvidia_get_icd_path(wchar_t *path, size_t capacity)
 {
     if (!path || !capacity) return FALSE;
@@ -494,6 +501,12 @@ BOOL nvidia_map_luid_to_guest(LUID *luid)
 
 BOOL nvidia_install_adapter_hooks(void)
 {
+    return FALSE;
+}
+
+BOOL WINAPI appsandbox_nvidia_adapter_luid(LUID *luid)
+{
+    (void)luid;
     return FALSE;
 }
 
