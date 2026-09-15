@@ -55,6 +55,7 @@ static void postToJs(NSDictionary *message) {
 #pragma mark - Event translation
 
 static NSDictionary *vmToJsDict(const AsbVmMac *vm) {
+    BOOL isWindows = strcasecmp(vm->os_type, "Windows") == 0;
     return @{
         @"name":            [NSString stringWithUTF8String:vm->name],
         @"osType":          [NSString stringWithUTF8String:vm->os_type],
@@ -66,8 +67,8 @@ static NSDictionary *vmToJsDict(const AsbVmMac *vm) {
         @"hddGb":           @(vm->hdd_gb),
         @"cpuCores":        @(vm->cpu_cores),
         @"gpuMode":         @(vm->gpu_mode),
-        @"gpuName":         [HostInfo hostGpuName],
-        @"networkMode":     @(vm->network_mode),
+        @"gpuName":         isWindows ? @"Software (WARP)" : [HostInfo hostGpuName],
+        @"networkMode":     @1,
         @"netAdapter":      @"",
         @"isTemplate":      @NO,
         @"hypervVideoOff":  @NO,
@@ -281,7 +282,7 @@ static void handleCreateVm(NSDictionary *msg) {
     int hddGb           = [msg[@"hddGb"] intValue];
     int cpuCores        = [msg[@"cpuCores"] intValue];
     int gpuMode         = [msg[@"gpuMode"] intValue];
-    int networkMode     = [msg[@"networkMode"] intValue];
+    int networkMode     = 1;
 
     NSString *usernameError = asb_mac_validate_username(osType, adminUser, name);
     if (usernameError) {

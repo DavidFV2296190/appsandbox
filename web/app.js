@@ -77,7 +77,7 @@ function sendCmd(action, data) { hostBridge.send(action, data); }
  * Per-OS field visibility — including the .needs-iso picker — is driven by
  * applyOsTypeUI(), which runs on both hosts. */
 if (hostBridge.isMac) {
-    var hide = document.querySelectorAll('.win-only, .needs-linux-version');
+    var hide = document.querySelectorAll('.win-only, .windows-host-only, .needs-linux-version');
     for (var i = 0; i < hide.length; i++) hide[i].style.display = 'none';
 }
 
@@ -574,7 +574,7 @@ function hidePassword() {
 function onNetModeChange() {
     /* Adapter dropdown only relevant for External */
     var mode = parseInt(document.getElementById('net-mode').value);
-    var show = (mode === 2) ? '' : 'none';
+    var show = (!hostBridge.isMac && mode === 2) ? '' : 'none';
     document.getElementById('net-adapter').style.display = show;
     document.getElementById('net-adapter-label').style.display = show;
 }
@@ -600,8 +600,8 @@ function gatherConfig() {
         ramMb:       alignRamMb(document.getElementById('ram-size').valueAsNumber),
         cpuCores:    document.getElementById('cpu-cores').valueAsNumber,
         gpuMode:     parseInt(document.getElementById('gpu-mode').value),
-        networkMode: parseInt(document.getElementById('net-mode').value),
-        netAdapter:  document.getElementById('net-adapter').value,
+        networkMode: hostBridge.isMac ? 1 : parseInt(document.getElementById('net-mode').value),
+        netAdapter:  hostBridge.isMac ? '' : document.getElementById('net-adapter').value,
         adminUser:   document.getElementById('admin-user').value.trim(),
         adminPass:   document.getElementById('admin-pass').value,
         adminConfirm: document.getElementById('admin-confirm').value,
@@ -977,8 +977,13 @@ function buildRowCells(vm, i, statusTd) {
         makeCell(vm.cpuCores, 'Number of virtual CPU cores assigned to this VM'),
         makeCell(vm.ramMb + ' MB', 'Memory allocated to this VM, in megabytes'),
         makeCell(vm.hddGb + ' GB', 'Virtual disk size, in gigabytes'),
-        makeCell(vm.gpuName || (vm.gpuMode === 2 ? 'Try all' : vm.gpuMode === 1 ? 'Default GPU' : 'None'), 'GPU passed through to the VM via GPU-PV, or None'),
-        makeCell(netNames[vm.networkMode] || 'None', 'Networking mode: NAT (shared), External (bridged), Internal (host-only), or None'),
+        makeCell(vm.gpuName || (vm.gpuMode === 2 ? 'Try all' : vm.gpuMode === 1 ? 'Default GPU' : 'None'),
+            hostBridge.isMac && vm.osType === 'Windows'
+                ? 'Windows software rendering (WARP) on the CPU'
+                : 'GPU passed through to the VM via GPU-PV, or None'),
+        makeCell(hostBridge.isMac ? 'NAT' : (netNames[vm.networkMode] || 'None'),
+            hostBridge.isMac ? 'NAT (shared networking)'
+                : 'Networking mode: NAT (shared), External (bridged), Internal (host-only), or None'),
     ];
     if (!hostBridge.isMac) cells.push(makeSnapCell(vm, i));
     cells.push(
