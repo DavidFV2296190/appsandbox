@@ -343,10 +343,23 @@ static void handleEditVm(NSDictionary *msg) {
     NSString *n = vmNameAtIndex(msg[@"vmIndex"]);
     NSString *field = msg[@"field"];
     id rawValue = msg[@"value"];
+    if (!n || ![field isKindOfClass:[NSString class]] ||
+        (![rawValue isKindOfClass:[NSString class]] && ![rawValue isKindOfClass:[NSNumber class]])) {
+        sendAlert(@"VM configuration could not be updated.");
+        sendVmListChanged();
+        return;
+    }
     NSString *value = [rawValue isKindOfClass:[NSString class]]
         ? rawValue : [NSString stringWithFormat:@"%@", rawValue];
-    if (!n || !field || !value) return;
-    asb_mac_vm_edit([n UTF8String], [field UTF8String], [value UTF8String]);
+    AsbVmMac *vm = asb_mac_vm_find(n.UTF8String);
+    if (!vm) {
+        sendAlert(@"VM configuration could not be updated.");
+    } else if (vm->running || (!vm->disk_built && vm->install_progress >= 0)) {
+        sendAlert(@"VM settings can only be changed when the VM is stopped and its disk build has finished.");
+    } else {
+        int rc = asb_mac_vm_edit([n UTF8String], [field UTF8String], [value UTF8String]);
+        if (rc != BACKEND_OK) sendAlert(@"VM configuration could not be updated.");
+    }
     sendVmListChanged();
 }
 
