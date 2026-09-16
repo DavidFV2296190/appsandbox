@@ -935,9 +935,10 @@ BOOL hcs_build_vm_json(const VmConfig *config, const wchar_t *endpoint_guid,
     /* Network adapter — skip for template VMs (no network during template creation) */
     net_section[0] = L'\0';
     if (endpoint_guid && endpoint_guid[0] != L'\0' && !config->is_template) {
+        if (!config->mac_address[0]) return FALSE;
         swprintf_s(net_section, 512,
-            L",\"NetworkAdapters\":{\"Default\":{\"EndpointId\":\"%s\"}}",
-            endpoint_guid);
+            L",\"NetworkAdapters\":{\"Default\":{\"EndpointId\":\"%s\",\"MacAddress\":\"%s\"}}",
+            endpoint_guid, config->mac_address);
     }
 
     /* Secure Boot — uses ApplySecureBootTemplate + SecureBootTemplateId
@@ -1059,7 +1060,7 @@ BOOL hcs_build_vm_json(const VmConfig *config, const wchar_t *endpoint_guid,
     /* Plan9 shares — GPU driver directories for agent p9copy.
        Skip for template VMs (no GPU assigned during template creation). */
     plan9_section[0] = L'\0';
-    if ((config->gpu_mode == GPU_DEFAULT || config->gpu_mode == GPU_MIRROR) && !config->is_template) {
+    if (config->gpu_mode == GPU_DEFAULT && !config->is_template) {
         wchar_t esc_buf[MAX_PATH * 2];
         wchar_t shares[8192];
         int share_count = 0;
@@ -1280,6 +1281,7 @@ HRESULT hcs_create_vm(const VmConfig *config, VmInstance *instance)
         instance->hdd_gb = config->hdd_gb;
         instance->cpu_cores = config->cpu_cores;
         instance->gpu_mode = config->gpu_mode;
+        wcscpy_s(instance->gpu_id, 512, config->gpu_id);
         instance->network_mode = config->network_mode;
         instance->is_template = config->is_template;
         instance->test_mode = config->test_mode;
@@ -1372,6 +1374,7 @@ HRESULT hcs_create_vm_with_endpoint(const VmConfig *config, const wchar_t *endpo
         instance->hdd_gb = config->hdd_gb;
         instance->cpu_cores = config->cpu_cores;
         instance->gpu_mode = config->gpu_mode;
+        wcscpy_s(instance->gpu_id, 512, config->gpu_id);
         instance->network_mode = config->network_mode;
         instance->is_template = config->is_template;
         instance->test_mode = config->test_mode;
@@ -1392,43 +1395,57 @@ HRESULT hcs_create_vm_with_endpoint(const VmConfig *config, const wchar_t *endpo
 static HRESULT hcs_apply_gpu(VmInstance *instance)
 {
     HCS_OPERATION op;
-    HRESULT hr;
+    HRESULT hr = E_FAIL;
     wchar_t modify_json[2048];
+    wchar_t gpu_id_esc[1024];
+    int attempt;
 
     if (!pfnModify || !instance->handle)
         return E_NOT_VALID_STATE;
-
-    if (instance->gpu_mode == GPU_DEFAULT) {
-        wcscpy_s(modify_json, 2048,
-            L"{"
-            L"\"ResourcePath\":\"VirtualMachine/ComputeTopology/Gpu\","
-            L"\"RequestType\":\"Update\","
-            L"\"Settings\":{"
-                L"\"AssignmentMode\":\"Default\","
-                L"\"AllowVendorExtension\":true"
-            L"}"
-            L"}");
-    } else if (instance->gpu_mode == GPU_MIRROR) {
-        wcscpy_s(modify_json, 2048,
-            L"{"
-            L"\"ResourcePath\":\"VirtualMachine/ComputeTopology/Gpu\","
-            L"\"RequestType\":\"Update\","
-            L"\"Settings\":{"
-                L"\"AssignmentMode\":\"Mirror\","
-                L"\"AllowVendorExtension\":true"
-            L"}"
-            L"}");
-    } else {
+    if (instance->gpu_mode != GPU_DEFAULT)
         return S_OK;
-    }
 
     ui_log(L"Applying GPU-PV...");
 
-    op = pfnCreateOp(NULL, NULL);
-    if (!op) return E_OUTOFMEMORY;
+    for (attempt = 0; attempt < 2; attempt++) {
+        if (instance->gpu_id[0] &&
+            !gpu_is_available(instance->gpu_id)) {
+            instance->gpu_id[0] = L'\0';
+            wcscpy_s(instance->gpu_name, 256, L"Default GPU");
+        }
+        if (instance->gpu_id[0]) {
+            escape_json_path(instance->gpu_id, gpu_id_esc, 1024);
+            swprintf_s(modify_json, 2048,
+                L"{"
+                L"\"ResourcePath\":\"VirtualMachine/ComputeTopology/Gpu\","
+                L"\"RequestType\":\"Update\","
+                L"\"Settings\":{"
+                    L"\"AssignmentMode\":\"List\","
+                    L"\"AssignmentRequest\":{\"%s\":65535},"
+                    L"\"AllowVendorExtension\":true"
+                L"}"
+                L"}", gpu_id_esc);
+        } else {
+            wcscpy_s(modify_json, 2048,
+                L"{"
+                L"\"ResourcePath\":\"VirtualMachine/ComputeTopology/Gpu\","
+                L"\"RequestType\":\"Update\","
+                L"\"Settings\":{"
+                    L"\"AssignmentMode\":\"Default\","
+                    L"\"AllowVendorExtension\":true"
+                L"}"
+                L"}");
+        }
 
-    hr = pfnModify(instance->handle, op, modify_json, NULL);
-    hr = hcs_exec_and_wait(hr, op);
+        op = pfnCreateOp(NULL, NULL);
+        if (!op) return E_OUTOFMEMORY;
+        hr = pfnModify(instance->handle, op, modify_json, NULL);
+        hr = hcs_exec_and_wait(hr, op);
+        if (SUCCEEDED(hr) || !instance->gpu_id[0] || gpu_is_available(instance->gpu_id))
+            break;
+        instance->gpu_id[0] = L'\0';
+        wcscpy_s(instance->gpu_name, 256, L"Default GPU");
+    }
 
     if (FAILED(hr))
         ui_log(L"Warning: GPU-PV apply failed (0x%08X). VM will run without GPU.", hr);

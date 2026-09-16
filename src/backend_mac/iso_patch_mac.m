@@ -431,6 +431,7 @@ static void ensure_fetch_registry(void) {
                        ramMb:(int)ramMb
                        cpus:(int)cpus
                       diskGb:(int)diskGb
+                  macAddress:(NSString *)macAddress
                    progress:(IsoPatchProgress)progressBlock
                  completion:(IsoPatchCompletion)completion {
     NSArray *args = @[
@@ -442,6 +443,7 @@ static void ensure_fetch_registry(void) {
         @"--ram-mb",   [NSString stringWithFormat:@"%d", ramMb],
         @"--cpus",     [NSString stringWithFormat:@"%d", cpus],
         @"--disk-gb",  [NSString stringWithFormat:@"%d", diskGb],
+        @"--mac-address", macAddress,
     ];
     [self runUnprivilegedArgs:args
                      progress:progressBlock
@@ -629,7 +631,7 @@ static BOOL write_prov_scripts(NSString *dir, NSString *sshMsiName) {
  * root daemon + GUI. Pulled from the public repo (raw.githubusercontent.com); the file never changes. */
 + (nullable NSString *)ensureNetkvmZipCached {
     NSString *name   = @"netkvm-arm64.zip";
-    NSString *urlStr = @"https://raw.githubusercontent.com/jamesstringer90/appsandbox/win-on-mac/vendor/virtio-win/netkvm-arm64.zip";
+    NSString *urlStr = @"https://raw.githubusercontent.com/jamesstringer90/appsandbox/main/vendor/virtio-win/netkvm-arm64.zip";
     NSString *cacheDir = [[VmDir vmsRootDirectory] URLByDeletingLastPathComponent].path;
     [[NSFileManager defaultManager] createDirectoryAtPath:cacheDir
                               withIntermediateDirectories:YES attributes:nil error:nil];

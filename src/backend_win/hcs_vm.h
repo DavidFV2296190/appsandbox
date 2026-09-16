@@ -20,7 +20,6 @@ typedef void *HCS_OPERATION;
 /* GPU assignment modes */
 #define GPU_NONE     0
 #define GPU_DEFAULT  1
-#define GPU_MIRROR   2
 
 /* Network modes */
 #define NET_NONE     0
@@ -37,8 +36,10 @@ typedef struct {
     DWORD   ram_mb;
     DWORD   hdd_gb;
     DWORD   cpu_cores;
-    int     gpu_mode;             /* GPU_NONE, GPU_DEFAULT, or GPU_MIRROR */
+    int     gpu_mode;
+    wchar_t gpu_id[512];
     int     network_mode;         /* NET_NONE, NET_NAT, NET_EXTERNAL, or NET_INTERNAL */
+    wchar_t mac_address[18];
     wchar_t admin_user[128];      /* Guest local admin username */
     wchar_t admin_pass[256];      /* Guest local admin password */
     wchar_t resources_iso_path[MAX_PATH]; /* ISO with autounattend + agent + helpers */
@@ -68,8 +69,10 @@ typedef struct {
     DWORD       cpu_cores;
     int         gpu_mode;
     wchar_t     gpu_name[256];
+    wchar_t     gpu_id[512];
     int         network_mode;
     wchar_t     net_adapter[256];     /* Adapter name for External network */
+    wchar_t     mac_address[18];
     GUID        network_id;
     GUID        endpoint_id;
     GUID        runtime_id;           /* VM RuntimeId for AF_HYPERV connections */

@@ -48,6 +48,61 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 
 static GpuList g_gpu_list;
 
+static const GpuInfo *find_gpu(const wchar_t *gpu_id)
+{
+    int i;
+    if (!gpu_id || !gpu_id[0]) return NULL;
+    for (i = 0; i < g_gpu_list.count; i++) {
+        if (_wcsicmp(g_gpu_list.gpus[i].interface_path, gpu_id) == 0)
+            return &g_gpu_list.gpus[i];
+    }
+    return NULL;
+}
+
+static void update_vm_gpu_name(VmInstance *vm)
+{
+    const GpuInfo *gpu = find_gpu(vm->gpu_id);
+    wcscpy_s(vm->gpu_name, ARRAYSIZE(vm->gpu_name),
+        vm->gpu_mode == GPU_DEFAULT ? (gpu ? gpu->name : L"Default GPU") : L"None");
+}
+
+static BOOL resolve_vm_gpu_selection(VmInstance *vm)
+{
+    BOOL changed = FALSE;
+    if (vm->gpu_mode > GPU_DEFAULT) {
+        vm->gpu_mode = GPU_DEFAULT;
+        vm->gpu_id[0] = L'\0';
+        changed = TRUE;
+    }
+    if (vm->gpu_id[0]) {
+        const GpuInfo *gpu = find_gpu(vm->gpu_id);
+        if (vm->gpu_mode != GPU_DEFAULT || !gpu || !gpu_is_available(vm->gpu_id)) {
+            vm->gpu_id[0] = L'\0';
+            vm->gpu_mode = GPU_DEFAULT;
+            changed = TRUE;
+        } else if (wcscmp(vm->gpu_id, gpu->interface_path) != 0) {
+            wcscpy_s(vm->gpu_id, ARRAYSIZE(vm->gpu_id), gpu->interface_path);
+            changed = TRUE;
+        }
+    }
+    update_vm_gpu_name(vm);
+    return changed;
+}
+
+ASB_API const wchar_t *asb_validate_gpu_selection(int gpu_mode, const wchar_t *gpu_id)
+{
+    if (gpu_mode < GPU_NONE || gpu_mode > GPU_DEFAULT)
+        return L"Invalid GPU mode.";
+    if (!gpu_id || !gpu_id[0]) return NULL;
+    if (wcslen(gpu_id) >= ARRAYSIZE(g_gpu_list.gpus[0].interface_path))
+        return L"GPU identifier is too long.";
+    if (gpu_mode != GPU_DEFAULT)
+        return L"A specific GPU requires Default GPU mode.";
+    if (!find_gpu(gpu_id) || !gpu_is_available(gpu_id))
+        return L"The selected GPU is no longer available. Choose another GPU or Default GPU.";
+    return NULL;
+}
+
 /* Prepare the GL mapping-layer Plan9 share for a Windows GPU guest: ensure the
  * D3D mapping layers (OpenCL/Vulkan/dxil) are fetched/cached on the host, stage
  * Mesa's standalone OpenGL trio (opengl32/gallium_wgl/z-1) alongside them, then
@@ -496,9 +551,13 @@ static void save_vm_list(void)
         fwprintf(f, L"CpuCores=%lu\n", g_vms[i].cpu_cores);
         fwprintf(f, L"GpuMode=%d\n", g_vms[i].gpu_mode);
         fwprintf(f, L"GpuName=%s\n", g_vms[i].gpu_name);
+        if (g_vms[i].gpu_id[0])
+            fwprintf(f, L"GpuId=%s\n", g_vms[i].gpu_id);
         fwprintf(f, L"NetworkMode=%d\n", g_vms[i].network_mode);
         if (g_vms[i].net_adapter[0] != L'\0')
             fwprintf(f, L"NetAdapter=%s\n", g_vms[i].net_adapter);
+        if (g_vms[i].mac_address[0])
+            fwprintf(f, L"MacAddress=%s\n", g_vms[i].mac_address);
         if (g_vms[i].resources_iso_path[0] != L'\0')
             fwprintf(f, L"ResourcesIso=%s\n", g_vms[i].resources_iso_path);
         if (g_vms[i].nat_ip[0] != '\0')
@@ -558,6 +617,7 @@ static void load_vm_list(void)
     BOOL in_settings = FALSE;
     unsigned char bom[3] = { 0 };
     BOOL unicode_config;
+    BOOL gpu_changed = FALSE;
 
     get_config_path(path, MAX_PATH);
     if (_wfopen_s(&f, path, L"rb") != 0 || !f) return;
@@ -641,12 +701,16 @@ static void load_vm_list(void)
             vm->gpu_mode = _wtoi(line + 8);
         else if (wcsncmp(line, L"GpuName=", 8) == 0)
             wcscpy_s(vm->gpu_name, 256, line + 8);
+        else if (wcsncmp(line, L"GpuId=", 6) == 0)
+            wcsncpy_s(vm->gpu_id, ARRAYSIZE(vm->gpu_id), line + 6, _TRUNCATE);
         else if (wcsncmp(line, L"GpuDevicePath=", 14) == 0)
             { /* ignored - backwards compat */ }
         else if (wcsncmp(line, L"NetworkMode=", 12) == 0)
             vm->network_mode = _wtoi(line + 12);
         else if (wcsncmp(line, L"NetAdapter=", 11) == 0)
             wcscpy_s(vm->net_adapter, 256, line + 11);
+        else if (wcsncmp(line, L"MacAddress=", 11) == 0)
+            wcsncpy_s(vm->mac_address, ARRAYSIZE(vm->mac_address), line + 11, _TRUNCATE);
         else if (wcsncmp(line, L"ResourcesIso=", 13) == 0)
             wcscpy_s(vm->resources_iso_path, MAX_PATH, line + 13);
         else if (wcsncmp(line, L"NatIp=", 6) == 0)
@@ -681,6 +745,7 @@ static void load_vm_list(void)
             wchar_t snap_dir[MAX_PATH];
             g_vms[i].handle = NULL;
             g_vms[i].running = FALSE;
+            if (resolve_vm_gpu_selection(&g_vms[i])) gpu_changed = TRUE;
             if (vm_load_state_json(g_vms[i].vhdx_path))
                 g_vms[i].install_complete = TRUE;
             if (get_vm_disk_root(g_vms[i].vhdx_path, snap_dir) &&
@@ -690,6 +755,7 @@ static void load_vm_list(void)
             }
         }
     }
+    if (gpu_changed) save_vm_list();
 }
 
 /* ---- Template scanning ---- */
@@ -918,6 +984,34 @@ ASB_API void asb_vm_cleanup_network(VmInstance *vm)
     vm->network_cleaned = TRUE;
 }
 
+static HRESULT ensure_vm_mac_address(VmInstance *vm)
+{
+    HRESULT hr = S_FALSE;
+    EnterCriticalSection(&g_cs);
+    if (!vm->mac_address[0]) {
+        for (;;) {
+            GUID id;
+            wchar_t address[18];
+            int i;
+            hr = CoCreateGuid(&id);
+            if (FAILED(hr)) break;
+            swprintf_s(address, ARRAYSIZE(address), L"%02X-%02X-%02X-%02X-%02X-%02X",
+                (id.Data4[2] & 0xFC) | 0x02, id.Data4[3], id.Data4[4],
+                id.Data4[5], id.Data4[6], id.Data4[7]);
+            for (i = 0; i < g_vm_count; i++) {
+                if (&g_vms[i] != vm && _wcsicmp(address, g_vms[i].mac_address) == 0)
+                    break;
+            }
+            if (i == g_vm_count) {
+                wcscpy_s(vm->mac_address, ARRAYSIZE(vm->mac_address), address);
+                break;
+            }
+        }
+    }
+    LeaveCriticalSection(&g_cs);
+    return hr;
+}
+
 /* ---- NAT IP allocation ---- */
 
 /* Allocate the next free IP in the chosen NAT /24 (see hcn_nat_subnet_base).
@@ -967,13 +1061,14 @@ static BOOL allocate_nat_ip(VmInstance *vm)
 static HRESULT try_endpoint_with_retry(const GUID *net_id, GUID *ep_id,
                                        wchar_t *ep_guid_str, size_t str_len,
                                        char *nat_ip, size_t nat_ip_size,
-                                       BOOL is_nat)
+                                       BOOL is_nat, const wchar_t *mac_address)
 {
     HRESULT hr;
     int retry;
 
     hr = hcn_create_endpoint(net_id, ep_id, ep_guid_str, str_len,
-                              (is_nat && nat_ip && nat_ip[0]) ? nat_ip : NULL);
+                              (is_nat && nat_ip && nat_ip[0]) ? nat_ip : NULL,
+                              mac_address);
     if (SUCCEEDED(hr) || !is_nat || !nat_ip || !nat_ip[0]) return hr;
 
     asb_log(L"Endpoint failed for %S, trying next IP...", nat_ip);
@@ -982,7 +1077,8 @@ static HRESULT try_endpoint_with_retry(const GUID *net_id, GUID *ep_id,
         if (sscanf_s(nat_ip, "%d.%d.%d.%d", &a, &b, &c, &d) != 4 || d >= 254) break;
         sprintf_s(nat_ip, nat_ip_size, "%d.%d.%d.%d", a, b, c, d + 1);
         asb_log(L"Retrying with %S...", nat_ip);
-        hr = hcn_create_endpoint(net_id, ep_id, ep_guid_str, str_len, nat_ip);
+        hr = hcn_create_endpoint(net_id, ep_id, ep_guid_str, str_len, nat_ip,
+                                  mac_address);
         if (SUCCEEDED(hr)) return hr;
     }
     return hr;
@@ -1026,7 +1122,8 @@ static DWORD WINAPI start_vm_thread(LPVOID param)
             hr = try_endpoint_with_retry(&args->network_id, &args->endpoint_id,
                                           endpoint_guid_str, 64,
                                           vm->nat_ip, sizeof(vm->nat_ip),
-                                          args->network_mode == NET_NAT);
+                                          args->network_mode == NET_NAT,
+                                          vm->mac_address);
             if (SUCCEEDED(hr) && args->network_mode == NET_NAT) save_vm_list();
             if (FAILED(hr)) {
                 asb_log(L"Error: Network endpoint failed (0x%08X).", hr);
@@ -1042,7 +1139,7 @@ static DWORD WINAPI start_vm_thread(LPVOID param)
         }
     }
 
-    if (args->config.gpu_mode == GPU_DEFAULT || args->config.gpu_mode == GPU_MIRROR) {
+    if (args->config.gpu_mode == GPU_DEFAULT) {
         gpu_get_driver_shares(&g_gpu_list, &args->config.gpu_shares);
         /* For Linux guests, also expose the host's lxss\lib so the
          * Linux agent mounts it at /usr/lib/wsl/lib alongside the
@@ -1077,6 +1174,7 @@ static DWORD WINAPI start_vm_thread(LPVOID param)
 
     asb_log(L"Starting VM \"%s\"...", vm->name);
     hr = hcs_start_vm(vm);
+    if (wcscmp(vm->gpu_id, args->config.gpu_id) != 0) save_vm_list();
     if (FAILED(hr)) {
         asb_log(L"Error: Failed to start VM (0x%08X)", hr);
         if (hr == (HRESULT)0x800705AF)
@@ -1331,7 +1429,8 @@ static DWORD WINAPI vhdx_create_thread(LPVOID param)
                               ? sizeof(g_vms[args->vm_index].nat_ip) : 0;
             hr = try_endpoint_with_retry(&args->network_id, &args->endpoint_id,
                                           args->endpoint_guid, 64,
-                                          nat_ip, ip_size, is_nat);
+                                          nat_ip, ip_size, is_nat,
+                                          args->config.mac_address);
             if (SUCCEEDED(hr)) {
                 args->has_network = TRUE;
                 if (is_nat) save_vm_list();
@@ -1421,6 +1520,7 @@ done:
         idx = inst ? (int)(inst - g_vms) : -1;
         if (inst) {
             inst->building_vhdx = FALSE;
+            wcscpy_s(inst->mac_address, ARRAYSIZE(inst->mac_address), args->config.mac_address);
 
             if (SUCCEEDED(args->result)) {
                 VmInstance *heap_inst = args->vm_inst;
@@ -1429,6 +1529,9 @@ done:
                     inst->handle = heap_inst->handle;
                     inst->runtime_id = heap_inst->runtime_id;
                     inst->running = TRUE;
+                    inst->gpu_mode = heap_inst->gpu_mode;
+                    wcscpy_s(inst->gpu_id, ARRAYSIZE(inst->gpu_id), heap_inst->gpu_id);
+                    update_vm_gpu_name(inst);
                     inst->network_mode = heap_inst->network_mode;
                     inst->network_id = args->network_id;
                     inst->endpoint_id = args->endpoint_id;
@@ -2505,7 +2608,8 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
                               ? sizeof(g_vms[args->vm_index].nat_ip) : 0;
             hr = try_endpoint_with_retry(&args->network_id, &args->endpoint_id,
                                           args->endpoint_guid, 64,
-                                          nat_ip, ip_size, is_nat);
+                                          nat_ip, ip_size, is_nat,
+                                          args->config.mac_address);
             if (SUCCEEDED(hr)) {
                 args->has_network = TRUE;
                 if (is_nat) save_vm_list();
@@ -2570,6 +2674,7 @@ done:
         idx = inst ? (int)(inst - g_vms) : -1;
         if (inst) {
             inst->building_vhdx = FALSE;
+            wcscpy_s(inst->mac_address, ARRAYSIZE(inst->mac_address), args->config.mac_address);
 
             if (SUCCEEDED(args->result)) {
                 VmInstance *heap_inst = args->vm_inst;
@@ -2578,6 +2683,9 @@ done:
                     inst->handle = heap_inst->handle;
                     inst->runtime_id = heap_inst->runtime_id;
                     inst->running = TRUE;
+                    inst->gpu_mode = heap_inst->gpu_mode;
+                    wcscpy_s(inst->gpu_id, ARRAYSIZE(inst->gpu_id), heap_inst->gpu_id);
+                    update_vm_gpu_name(inst);
                     inst->network_mode = heap_inst->network_mode;
                     inst->network_id = args->network_id;
                     inst->endpoint_id = args->endpoint_id;
@@ -3037,6 +3145,7 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
         const wchar_t *error = asb_validate_username(effective_os, config->username,
                                                     config->name, config->is_template);
         if (!error) error = asb_validate_password(effective_os, config->password);
+        if (!error) error = asb_validate_gpu_selection(config->gpu_mode, config->gpu_id);
         if (error) {
             asb_log(L"Error: %s", error);
             asb_alert(error);
@@ -3060,6 +3169,8 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
     cfg.hdd_gb = config->hdd_gb;
     cfg.cpu_cores = config->cpu_cores;
     cfg.gpu_mode = config->gpu_mode;
+    if (config->gpu_id && config->gpu_id[0])
+        wcscpy_s(cfg.gpu_id, ARRAYSIZE(cfg.gpu_id), find_gpu(config->gpu_id)->interface_path);
     cfg.network_mode = config->network_mode;
     cfg.test_mode = config->test_mode;
     cfg.ssh_enabled = config->ssh_enabled;
@@ -3169,7 +3280,14 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
     /* Template flag */
     if (is_template_create) {
         cfg.gpu_mode = GPU_NONE;
+        cfg.gpu_id[0] = L'\0';
         cfg.network_mode = NET_NONE;
+    }
+
+    if (cfg.network_mode != NET_NONE) {
+        hr = ensure_vm_mac_address(inst);
+        if (FAILED(hr)) return hr;
+        wcscpy_s(cfg.mac_address, ARRAYSIZE(cfg.mac_address), inst->mac_address);
     }
 
     {
@@ -3200,7 +3318,7 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
     swprintf_s(cfg.vhdx_path, MAX_PATH, L"%s\\disk.vhdx", vhdx_dir);
 
     /* GPU driver shares */
-    if ((cfg.gpu_mode == GPU_DEFAULT || cfg.gpu_mode == GPU_MIRROR) && !is_template_create) {
+    if (cfg.gpu_mode == GPU_DEFAULT && !is_template_create) {
         gpu_get_driver_shares(&g_gpu_list, &cfg.gpu_shares);
         /* Linux guests additionally consume %SystemRoot%\System32\lxss\lib
          * (NVIDIA's WSL-staged Linux userspace .so files), mounted at
@@ -3233,8 +3351,8 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
             inst->hdd_gb = cfg.hdd_gb;
             inst->cpu_cores = cfg.cpu_cores;
             inst->gpu_mode = cfg.gpu_mode;
-            wcscpy_s(inst->gpu_name, 256, cfg.gpu_mode == GPU_MIRROR ? L"Try all" :
-                                          cfg.gpu_mode == GPU_DEFAULT ? L"Default GPU" : L"None");
+            wcscpy_s(inst->gpu_id, ARRAYSIZE(inst->gpu_id), cfg.gpu_id);
+            update_vm_gpu_name(inst);
             inst->network_mode = cfg.network_mode;
             inst->is_template = is_template_create;
             inst->test_mode = cfg.test_mode;
@@ -3304,8 +3422,8 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
             inst->hdd_gb = cfg.hdd_gb;
             inst->cpu_cores = cfg.cpu_cores;
             inst->gpu_mode = cfg.gpu_mode;
-            wcscpy_s(inst->gpu_name, 256, cfg.gpu_mode == GPU_MIRROR ? L"Try all" :
-                                          cfg.gpu_mode == GPU_DEFAULT ? L"Default GPU" : L"None");
+            wcscpy_s(inst->gpu_id, ARRAYSIZE(inst->gpu_id), cfg.gpu_id);
+            update_vm_gpu_name(inst);
             inst->network_mode = cfg.network_mode;
             inst->is_template = FALSE;
             inst->test_mode = cfg.test_mode;
@@ -3470,7 +3588,8 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
             hr = try_endpoint_with_retry(&inst->network_id, &inst->endpoint_id,
                                           endpoint_guid_str, 64,
                                           inst->nat_ip, sizeof(inst->nat_ip),
-                                          cfg.network_mode == NET_NAT);
+                                          cfg.network_mode == NET_NAT,
+                                          inst->mac_address);
             if (SUCCEEDED(hr) && cfg.network_mode == NET_NAT) save_vm_list();
             if (FAILED(hr)) {
                 asb_log(L"Warning: Endpoint failed (0x%08X).", hr);
@@ -3498,8 +3617,7 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
         return hr;
     }
 
-    wcscpy_s(inst->gpu_name, 256, cfg.gpu_mode == GPU_MIRROR ? L"Try all" :
-                                  cfg.gpu_mode == GPU_DEFAULT ? L"Default GPU" : L"None");
+    update_vm_gpu_name(inst);
     wcscpy_s(inst->resources_iso_path, MAX_PATH, cfg.resources_iso_path);
     /* hcs_create_vm copies ssh_enabled onto the instance but not the deploy
        fields, so the from-template path sets them here (the ISO and Linux
@@ -3549,6 +3667,12 @@ ASB_API HRESULT asb_vm_start(AsbVm vm, int snap_idx, int branch_idx,
     inst = &g_vms[idx];
 
     if (inst->running) { asb_log(L"VM \"%s\" is already running.", inst->name); return S_FALSE; }
+    if (resolve_vm_gpu_selection(inst)) save_vm_list();
+    if (inst->network_mode != NET_NONE) {
+        HRESULT hr = ensure_vm_mac_address(inst);
+        if (FAILED(hr)) return hr;
+        if (hr == S_OK) save_vm_list();
+    }
 
     /* Switch to snapshot/base branch before booting */
     if (snap_idx >= 0 || snap_idx == -2) {
@@ -3603,7 +3727,9 @@ ASB_API HRESULT asb_vm_start(AsbVm vm, int snap_idx, int branch_idx,
         args->config.hdd_gb = inst->hdd_gb;
         args->config.cpu_cores = inst->cpu_cores;
         args->config.gpu_mode = inst->gpu_mode;
+        wcscpy_s(args->config.gpu_id, ARRAYSIZE(args->config.gpu_id), inst->gpu_id);
         args->config.network_mode = inst->network_mode;
+        wcscpy_s(args->config.mac_address, ARRAYSIZE(args->config.mac_address), inst->mac_address);
         args->config.test_mode = inst->test_mode;
         wcscpy_s(args->config.admin_user, 128, inst->admin_user);
         args->config.ssh_enabled = inst->ssh_enabled;
@@ -3613,7 +3739,9 @@ ASB_API HRESULT asb_vm_start(AsbVm vm, int snap_idx, int branch_idx,
         asb_log(L"Starting VM \"%s\" (background)...", inst->name);
         CloseHandle(CreateThread(NULL, 0, start_vm_thread, args, 0, NULL));
     } else {
+        BOOL selected_gpu = inst->gpu_id[0] != L'\0';
         HRESULT hr = hcs_start_vm(inst);
+        if (selected_gpu && !inst->gpu_id[0]) save_vm_list();
         if (hr == (HRESULT)0x80370110L && inst->handle) {
             hcs_terminate_vm(inst);
             hcs_close_vm(inst);
@@ -3931,12 +4059,19 @@ ASB_API HRESULT asb_vm_set_cpu(AsbVm vm, DWORD cores)
 
 ASB_API HRESULT asb_vm_set_gpu(AsbVm vm, int gpu_mode)
 {
+    return asb_vm_set_gpu_selection(vm, gpu_mode, NULL);
+}
+
+ASB_API HRESULT asb_vm_set_gpu_selection(AsbVm vm, int gpu_mode, const wchar_t *gpu_id)
+{
     int idx = vm_index_of(vm);
     if (idx < 0) return E_INVALIDARG;
-    if (g_vms[idx].running) return E_ACCESSDENIED;
+    if (g_vms[idx].running || g_vms[idx].building_vhdx) return E_ACCESSDENIED;
+    if (asb_validate_gpu_selection(gpu_mode, gpu_id)) return E_INVALIDARG;
     g_vms[idx].gpu_mode = gpu_mode;
-    wcscpy_s(g_vms[idx].gpu_name, 256, gpu_mode == GPU_MIRROR ? L"Try all" :
-                                        gpu_mode == GPU_DEFAULT ? L"Default GPU" : L"None");
+    wcscpy_s(g_vms[idx].gpu_id, ARRAYSIZE(g_vms[idx].gpu_id),
+        gpu_id && gpu_id[0] ? find_gpu(gpu_id)->interface_path : L"");
+    update_vm_gpu_name(&g_vms[idx]);
     save_vm_list();
     if (g_state_cb) g_state_cb(vm, g_vms[idx].running, g_state_ud);
     return S_OK;

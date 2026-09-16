@@ -63,6 +63,7 @@ typedef struct {
     BOOL   ssh_deploy_key;         /* TRUE = deploy the AppSandbox public key (needs ssh_enabled) */
     BOOL   is_template;            /* TRUE = create as template VM */
     const wchar_t *disk_directory; /* parent for a new VM folder; NULL/empty = default */
+    const wchar_t *gpu_id;
 } AsbVmConfig;
 
 /* ---- Snapshot/branch info (returned by query functions) ---- */
@@ -135,6 +136,8 @@ ASB_API const wchar_t *asb_validate_username(const wchar_t *os_type,
 ASB_API const wchar_t *asb_validate_password(const wchar_t *os_type,
     const wchar_t *password);
 
+ASB_API const wchar_t *asb_validate_gpu_selection(int gpu_mode, const wchar_t *gpu_id);
+
 ASB_API void asb_default_disk_directory(wchar_t *out, size_t out_len);
 
 ASB_API const wchar_t *asb_validate_disk_directory(const wchar_t *name,
@@ -191,6 +194,7 @@ ASB_API HRESULT asb_vm_set_name(AsbVm vm, const wchar_t *name);
 ASB_API HRESULT asb_vm_set_ram(AsbVm vm, DWORD ram_mb);
 ASB_API HRESULT asb_vm_set_cpu(AsbVm vm, DWORD cores);
 ASB_API HRESULT asb_vm_set_gpu(AsbVm vm, int gpu_mode);
+ASB_API HRESULT asb_vm_set_gpu_selection(AsbVm vm, int gpu_mode, const wchar_t *gpu_id);
 ASB_API HRESULT asb_vm_set_network(AsbVm vm, int mode);
 
 /* ---- Snapshots ---- */

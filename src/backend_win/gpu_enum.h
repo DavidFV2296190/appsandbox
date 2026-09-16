@@ -21,6 +21,7 @@ typedef struct {
 
 typedef struct {
     wchar_t name[256];
+    wchar_t location[512];
     wchar_t instance_path[512];
     wchar_t interface_path[512]; /* GPU-PV partition adapter device interface path */
     wchar_t driver_store_path[MAX_PATH]; /* DriverStore\FileRepository\<folder> path */
@@ -38,6 +39,7 @@ typedef struct {
    DriverStore paths, and Plan9 share mappings.
    Returns TRUE on success. */
 BOOL gpu_enumerate(GpuList *list);
+BOOL gpu_is_available(const wchar_t *gpu_id);
 
 /* Get the DriverStore folder path for the default GPU-PV capable GPU.
    Returns TRUE and fills out_path on success.

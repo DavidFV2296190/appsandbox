@@ -219,12 +219,76 @@ static BOOL resolve_driver_store_wmi(const wchar_t *device_name,
     return ok;
 }
 
+static BOOL resolve_gpu_interface_path(GpuInfo *gpu, const wchar_t *setup_path)
+{
+    GUID guid = GUID_GPU_PARTITION_ADAPTER;
+    ULONG length = 0;
+    wchar_t *paths, *path;
+    BOOL found = FALSE;
+
+    if (CM_Get_Device_Interface_List_SizeW(&length, &guid, gpu->instance_path,
+            CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS || length < 2)
+        return FALSE;
+    paths = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)length * sizeof(wchar_t));
+    if (!paths) return FALSE;
+    if (CM_Get_Device_Interface_ListW(&guid, gpu->instance_path, paths, length,
+            CM_GET_DEVICE_INTERFACE_LIST_PRESENT) == CR_SUCCESS) {
+        for (path = paths; *path; path += wcslen(path) + 1) {
+            if (_wcsicmp(path, setup_path) == 0 &&
+                wcslen(path) < ARRAYSIZE(gpu->interface_path)) {
+                wcscpy_s(gpu->interface_path, ARRAYSIZE(gpu->interface_path), path);
+                found = TRUE;
+                break;
+            }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, paths);
+    return found;
+}
+
+static void disambiguate_gpu_names(GpuList *list, const wchar_t addresses[MAX_GPUS][32])
+{
+    wchar_t names[MAX_GPUS][256];
+    int i, j;
+
+    for (i = 0; i < list->count; i++) {
+        BOOL duplicate = FALSE, unique_address = addresses[i][0] != L'\0';
+        int number = 1;
+        wchar_t suffix[32];
+
+        for (j = 0; j < list->count; j++) {
+            if (i == j || _wcsicmp(list->gpus[i].name, list->gpus[j].name) != 0)
+                continue;
+            duplicate = TRUE;
+            if (wcscmp(addresses[i], addresses[j]) == 0) unique_address = FALSE;
+            if (_wcsicmp(list->gpus[j].interface_path, list->gpus[i].interface_path) < 0)
+                number++;
+        }
+        if (!duplicate) {
+            wcscpy_s(names[i], ARRAYSIZE(names[i]), list->gpus[i].name);
+            continue;
+        }
+        if (unique_address)
+            wcscpy_s(suffix, ARRAYSIZE(suffix), addresses[i]);
+        else {
+            swprintf_s(suffix, ARRAYSIZE(suffix), L"GPU %d", number);
+            wcscpy_s(list->gpus[i].location, ARRAYSIZE(list->gpus[i].location),
+                list->gpus[i].instance_path);
+        }
+        swprintf_s(names[i], ARRAYSIZE(names[i]), L"%.*s (%s)",
+            (int)(ARRAYSIZE(names[i]) - wcslen(suffix) - 4), list->gpus[i].name, suffix);
+    }
+    for (i = 0; i < list->count; i++)
+        wcscpy_s(list->gpus[i].name, ARRAYSIZE(list->gpus[i].name), names[i]);
+}
+
 BOOL gpu_enumerate(GpuList *list)
 {
     HDEVINFO iface_set;
     SP_DEVICE_INTERFACE_DATA iface_data;
     SP_DEVINFO_DATA dev_data;
     DWORD idx;
+    wchar_t addresses[MAX_GPUS][32] = {0};
 
     if (!list) return FALSE;
     list->count = 0;
@@ -251,24 +315,47 @@ BOOL gpu_enumerate(GpuList *list)
         if (!SetupDiGetDeviceInterfaceDetailW(iface_set, &iface_data,
                 detail, sizeof(detail_buf), NULL, &dev_data))
             continue;
+        if (!IsEqualGUID(&dev_data.ClassGuid, &GUID_DEVCLASS_DISPLAY))
+            continue;
 
         list->gpus[list->count].driver_store_path[0] = L'\0';
         list->gpus[list->count].service[0] = L'\0';
 
+        if (CM_Get_Device_IDW(dev_data.DevInst,
+                list->gpus[list->count].instance_path, 512, 0) != CR_SUCCESS)
+            continue;
+
         /* Interface path */
-        wcscpy_s(list->gpus[list->count].interface_path, 512, detail->DevicePath);
+        if (!resolve_gpu_interface_path(&list->gpus[list->count], detail->DevicePath))
+            continue;
 
         /* Device name */
         if (!SetupDiGetDeviceRegistryPropertyW(iface_set, &dev_data,
+                SPDRP_FRIENDLYNAME, NULL,
+                (BYTE *)list->gpus[list->count].name,
+                sizeof(list->gpus[list->count].name), NULL) &&
+            !SetupDiGetDeviceRegistryPropertyW(iface_set, &dev_data,
                 SPDRP_DEVICEDESC, NULL,
                 (BYTE *)list->gpus[list->count].name,
                 sizeof(list->gpus[list->count].name), NULL))
             wcscpy_s(list->gpus[list->count].name, 256, L"Unknown GPU");
 
-        /* Instance path */
-        if (CM_Get_Device_IDW(dev_data.DevInst,
-                list->gpus[list->count].instance_path, 512, 0) != CR_SUCCESS)
-            list->gpus[list->count].instance_path[0] = L'\0';
+        {
+            GpuInfo *gpu = &list->gpus[list->count];
+            DWORD bus, address;
+            if (!SetupDiGetDeviceRegistryPropertyW(iface_set, &dev_data,
+                    SPDRP_LOCATION_INFORMATION, NULL, (BYTE *)gpu->location,
+                    sizeof(gpu->location), NULL) || !gpu->location[0])
+                wcscpy_s(gpu->location, ARRAYSIZE(gpu->location), gpu->instance_path);
+            if (_wcsnicmp(gpu->instance_path, L"PCI\\", 4) == 0 &&
+                SetupDiGetDeviceRegistryPropertyW(iface_set, &dev_data,
+                    SPDRP_BUSNUMBER, NULL, (BYTE *)&bus, sizeof(bus), NULL) &&
+                SetupDiGetDeviceRegistryPropertyW(iface_set, &dev_data,
+                    SPDRP_ADDRESS, NULL, (BYTE *)&address, sizeof(address), NULL) &&
+                bus <= 255 && HIWORD(address) <= 31 && LOWORD(address) <= 7)
+                swprintf_s(addresses[list->count], ARRAYSIZE(addresses[list->count]),
+                    L"B%lu,D%u,F%u", bus, (unsigned)HIWORD(address), (unsigned)LOWORD(address));
+        }
 
         /* Service name */
         SetupDiGetDeviceRegistryPropertyW(iface_set, &dev_data,
@@ -304,6 +391,8 @@ BOOL gpu_enumerate(GpuList *list)
     }
 
     SetupDiDestroyDeviceInfoList(iface_set);
+
+    disambiguate_gpu_names(list, addresses);
 
     /* Build Plan9 shares from the DriverStore paths found above */
     {
@@ -348,6 +437,41 @@ BOOL gpu_enumerate(GpuList *list)
     }
 
     return TRUE;
+}
+
+BOOL gpu_is_available(const wchar_t *gpu_id)
+{
+    HDEVINFO iface_set;
+    SP_DEVICE_INTERFACE_DATA iface_data;
+    SP_DEVINFO_DATA dev_data;
+    DWORD idx;
+    BOOL found = FALSE;
+
+    if (!gpu_id || !gpu_id[0]) return FALSE;
+    iface_set = SetupDiGetClassDevsW(&GUID_GPU_PARTITION_ADAPTER, NULL, NULL,
+                                   DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (iface_set == INVALID_HANDLE_VALUE) return FALSE;
+    iface_data.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
+    for (idx = 0; SetupDiEnumDeviceInterfaces(iface_set, NULL,
+            &GUID_GPU_PARTITION_ADAPTER, idx, &iface_data); idx++) {
+        BYTE detail_buf[sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W) + 512 * sizeof(wchar_t)];
+        SP_DEVICE_INTERFACE_DETAIL_DATA_W *detail =
+            (SP_DEVICE_INTERFACE_DETAIL_DATA_W *)detail_buf;
+
+        dev_data.cbSize = sizeof(SP_DEVINFO_DATA);
+        detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+        if (!SetupDiGetDeviceInterfaceDetailW(iface_set, &iface_data,
+                detail, sizeof(detail_buf), NULL, &dev_data))
+            continue;
+        if ((iface_data.Flags & SPINT_ACTIVE) &&
+            IsEqualGUID(&dev_data.ClassGuid, &GUID_DEVCLASS_DISPLAY) &&
+            _wcsicmp(detail->DevicePath, gpu_id) == 0) {
+            found = TRUE;
+            break;
+        }
+    }
+    SetupDiDestroyDeviceInfoList(iface_set);
+    return found;
 }
 
 /* ---- Share helpers ---- */

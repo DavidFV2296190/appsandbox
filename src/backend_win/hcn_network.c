@@ -27,6 +27,7 @@ typedef HRESULT (WINAPI *PFN_HcnOpenNetwork)(
 /* ---- Loaded function pointers ---- */
 
 static HMODULE g_hcn_dll = NULL;
+static SRWLOCK g_network_lock = SRWLOCK_INIT;
 
 static PFN_HcnCreateNetwork    pfnCreateNet;
 static PFN_HcnCreateEndpoint   pfnCreateEp;
@@ -306,7 +307,9 @@ static void pick_nat_base_once(void)
 
 const char *hcn_nat_subnet_base(void)
 {
+    AcquireSRWLockExclusive(&g_network_lock);
     pick_nat_base_once();
+    ReleaseSRWLockExclusive(&g_network_lock);
     return g_nat_base;
 }
 
@@ -322,10 +325,13 @@ HRESULT hcn_create_nat_network(GUID *network_id)
 
     *network_id = APPSANDBOX_NAT_GUID;
 
+    AcquireSRWLockExclusive(&g_network_lock);
     /* Reuse the existing AppSandbox NAT network if it's already up -
        multiple VMs share one network, each with its own endpoint. */
-    if (hcn_network_exists(&APPSANDBOX_NAT_GUID))
+    if (hcn_network_exists(&APPSANDBOX_NAT_GUID)) {
+        ReleaseSRWLockExclusive(&g_network_lock);
         return S_OK;
+    }
 
     pick_nat_base_once();
 
@@ -353,6 +359,7 @@ HRESULT hcn_create_nat_network(GUID *network_id)
     if (network && pfnCloseNet)
         pfnCloseNet(network);
 
+    ReleaseSRWLockExclusive(&g_network_lock);
     return hr;
 }
 
@@ -368,8 +375,11 @@ HRESULT hcn_create_internal_network(GUID *network_id)
 
     *network_id = APPSANDBOX_INTERNAL_GUID;
 
-    if (hcn_network_exists(&APPSANDBOX_INTERNAL_GUID))
+    AcquireSRWLockExclusive(&g_network_lock);
+    if (hcn_network_exists(&APPSANDBOX_INTERNAL_GUID)) {
+        ReleaseSRWLockExclusive(&g_network_lock);
         return S_OK;
+    }
 
     swprintf_s(settings, 1024,
         L"{"
@@ -386,6 +396,7 @@ HRESULT hcn_create_internal_network(GUID *network_id)
     }
     if (network && pfnCloseNet) pfnCloseNet(network);
 
+    ReleaseSRWLockExclusive(&g_network_lock);
     return hr;
 }
 
@@ -402,8 +413,11 @@ HRESULT hcn_create_external_network(GUID *network_id, const wchar_t *adapter_nam
 
     *network_id = APPSANDBOX_EXTERNAL_GUID;
 
-    if (hcn_network_exists(&APPSANDBOX_EXTERNAL_GUID))
+    AcquireSRWLockExclusive(&g_network_lock);
+    if (hcn_network_exists(&APPSANDBOX_EXTERNAL_GUID)) {
+        ReleaseSRWLockExclusive(&g_network_lock);
         return S_OK;
+    }
 
     /* Use specified adapter, or auto-detect */
     if (adapter_name && adapter_name[0] != L'\0') {
@@ -412,6 +426,7 @@ HRESULT hcn_create_external_network(GUID *network_id, const wchar_t *adapter_nam
     } else {
         if (!get_default_adapter_name(adapter, 256)) {
             ui_log(L"Error: No connected network adapter found for External network.");
+            ReleaseSRWLockExclusive(&g_network_lock);
             return E_FAIL;
         }
     }
@@ -432,16 +447,32 @@ HRESULT hcn_create_external_network(GUID *network_id, const wchar_t *adapter_nam
     }
     if (network && pfnCloseNet) pfnCloseNet(network);
 
+    ReleaseSRWLockExclusive(&g_network_lock);
     return hr;
+}
+
+static BOOL valid_mac_address(const wchar_t *address)
+{
+    size_t i;
+    if (wcslen(address) != 17) return FALSE;
+    for (i = 0; i < 17; i++) {
+        if (i % 3 == 2) {
+            if (address[i] != L'-' && address[i] != L':') return FALSE;
+        } else if (!wcschr(L"0123456789abcdefABCDEF", address[i])) {
+            return FALSE;
+        }
+    }
+    return TRUE;
 }
 
 HRESULT hcn_create_endpoint(const GUID *network_id, GUID *endpoint_id,
                             wchar_t *endpoint_guid_str, size_t str_len,
-                            const char *nat_ip)
+                            const char *nat_ip, const wchar_t *mac_address)
 {
     wchar_t net_guid_str[64];
     wchar_t ep_guid_str[64];
     wchar_t settings[1024];
+    wchar_t mac_settings[64] = L"";
     void *network = NULL;
     void *endpoint = NULL;
     PWSTR error_record = NULL;
@@ -449,6 +480,9 @@ HRESULT hcn_create_endpoint(const GUID *network_id, GUID *endpoint_id,
 
     if (!g_hcn_dll || !pfnCreateEp || !pfnOpenNet)
         return E_NOT_VALID_STATE;
+    if (!mac_address || !valid_mac_address(mac_address))
+        return E_INVALIDARG;
+    swprintf_s(mac_settings, ARRAYSIZE(mac_settings), L",\"MacAddress\":\"%s\"", mac_address);
 
     /* Open the network */
     hr = pfnOpenNet(network_id, &network, &error_record);
@@ -466,22 +500,22 @@ HRESULT hcn_create_endpoint(const GUID *network_id, GUID *endpoint_id,
             L"\"SchemaVersion\":{\"Major\":2,\"Minor\":0},"
             L"\"HostComputeNetwork\":\"%s\","
             L"\"IpConfigurations\":[{\"IpAddress\":\"%S\",\"PrefixLength\":24}]"
-            L"}", net_guid_str, nat_ip);
+            L"%s}", net_guid_str, nat_ip, mac_settings);
     } else if (IsEqualGUID(network_id, &APPSANDBOX_NAT_GUID)) {
-        pick_nat_base_once();
+        hcn_nat_subnet_base();
         swprintf_s(settings, 1024,
             L"{"
             L"\"SchemaVersion\":{\"Major\":2,\"Minor\":0},"
             L"\"HostComputeNetwork\":\"%s\","
             L"\"IpConfigurations\":[{\"IpAddress\":\"%S.2\",\"PrefixLength\":24}]"
-            L"}", net_guid_str, g_nat_base);
+            L"%s}", net_guid_str, g_nat_base, mac_settings);
     } else {
         /* Internal (ICS DHCP) or External (LAN DHCP) - no static IP */
         swprintf_s(settings, 1024,
             L"{"
             L"\"SchemaVersion\":{\"Major\":2,\"Minor\":0},"
             L"\"HostComputeNetwork\":\"%s\""
-            L"}", net_guid_str);
+            L"%s}", net_guid_str, mac_settings);
     }
 
     hr = pfnCreateEp(network, endpoint_id, settings, &endpoint, &error_record);

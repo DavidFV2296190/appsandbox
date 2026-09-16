@@ -201,12 +201,29 @@ static DWORD WINAPI ssh_listener_thread(LPVOID param)
     /* If we have a previously persisted port, try that first */
     if (proxy->vm->ssh_port != 0) {
         bind_addr.sin_port = htons((u_short)proxy->vm->ssh_port);
-        if (bind(proxy->listen_sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) == 0)
-            goto bound;
-        /* Port in use — fall back to ephemeral */
+        for (i = 0; i < 5; i++) {
+            int error;
+            wchar_t message[512];
+            DWORD length;
+
+            if (proxy->stop) goto cleanup;
+            if (bind(proxy->listen_sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) == 0)
+                goto bound;
+
+            error = WSAGetLastError();
+            length = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                    NULL, error, 0, message, 512, NULL);
+            if (!length) wcscpy_s(message, 512, L"Unknown socket error");
+            while (length && (message[length - 1] == L'\r' || message[length - 1] == L'\n'))
+                message[--length] = L'\0';
+            ui_log(L"SSH proxy: bind to 127.0.0.1:%lu failed for \"%s\" (attempt %d/5, error %d): %s",
+                   proxy->vm->ssh_port, proxy->vm->name, i + 1, error, message);
+            if (i < 4) Sleep(1000);
+        }
         bind_addr.sin_port = 0;
     }
 
+    if (proxy->stop) goto cleanup;
     if (bind(proxy->listen_sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
         ui_log(L"SSH proxy: bind() failed for \"%s\" (%d).",
                proxy->vm->name, WSAGetLastError());
@@ -313,6 +330,7 @@ bound:
     }
     LeaveCriticalSection(&proxy->cs);
 
+cleanup:
     closesocket(proxy->listen_sock);
     proxy->listen_sock = INVALID_SOCKET;
     return 0;
@@ -399,10 +417,7 @@ void vm_ssh_proxy_stop(VmInstance *instance)
     }
     LeaveCriticalSection(&g_proxy_cs);
 
-    /* Signal stop and close listen socket to unblock accept */
     proxy->stop = TRUE;
-    if (proxy->listen_sock != INVALID_SOCKET)
-        closesocket(proxy->listen_sock);
 
     if (proxy->thread) {
         /* Wait for the listener thread to fully exit before freeing proxy. Its

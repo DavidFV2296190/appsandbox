@@ -26,6 +26,7 @@ typedef struct {
     int     cpu_cores;
     int     gpu_mode;
     int     network_mode;
+    char    mac_address[18];
     BOOL    test_mode;             /* Windows guest: Secure Boot off + test-signing on. Set at create,
                                       persisted, read at start. Our guest drivers are test-signed, so a
                                       Windows-on-Mac VM normally needs this — but it is NOT forced. */

@@ -96,6 +96,7 @@ static VZMacGraphicsDeviceConfiguration *BuildGraphics(void) {
                                                   machineIdentifier:(VZMacMachineIdentifier *)machineId
                                                               ramMb:(int)ramMb
                                                            cpuCount:(int)cpuCount
+                                                         macAddress:(VZMACAddress *)macAddress
                                                               error:(NSError **)error {
     VZVirtualMachineConfiguration *config = [[VZVirtualMachineConfiguration alloc] init];
 
@@ -119,7 +120,7 @@ static VZMacGraphicsDeviceConfiguration *BuildGraphics(void) {
     config.storageDevices = @[[[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:att]];
 
     config.graphicsDevices = @[BuildGraphics()];
-    config.networkDevices = @[[VzNetwork natConfiguration]];
+    config.networkDevices = @[[VzNetwork natConfigurationWithMACAddress:macAddress]];
     config.pointingDevices = @[[[VZMacTrackpadConfiguration alloc] init],
                                 [[VZUSBScreenCoordinatePointingDeviceConfiguration alloc] init]];
     config.keyboards = @[[[VZUSBKeyboardConfiguration alloc] init]];
@@ -133,6 +134,7 @@ static VZMacGraphicsDeviceConfiguration *BuildGraphics(void) {
 + (VzVm *)loadVmNamed:(NSString *)name
                 ramMb:(int)ramMb
              cpuCores:(int)cpuCores
+           macAddress:(VZMACAddress *)macAddress
                 error:(NSError **)error {
     NSData *hwData = [NSData dataWithContentsOfURL:[VmDir hardwareModelURLFor:name]];
     NSData *midData = [NSData dataWithContentsOfURL:[VmDir machineIdentifierURLFor:name]];
@@ -176,7 +178,7 @@ static VZMacGraphicsDeviceConfiguration *BuildGraphics(void) {
     config.bootLoader = [[VZMacOSBootLoader alloc] init];
     config.storageDevices = @[[[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:att]];
     config.graphicsDevices = @[BuildGraphics()];
-    config.networkDevices = @[[VzNetwork natConfiguration]];
+    config.networkDevices = @[[VzNetwork natConfigurationWithMACAddress:macAddress]];
     config.pointingDevices = @[[[VZMacTrackpadConfiguration alloc] init],
                                 [[VZUSBScreenCoordinatePointingDeviceConfiguration alloc] init]];
     config.keyboards = @[[[VZUSBKeyboardConfiguration alloc] init]];

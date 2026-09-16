@@ -52,6 +52,7 @@ typedef void (^IsoPatchCompletion)(NSError * _Nullable error);
                        ramMb:(int)ramMb
                        cpus:(int)cpus
                       diskGb:(int)diskGb
+                  macAddress:(NSString *)macAddress
                    progress:(nullable IsoPatchProgress)progress
                  completion:(IsoPatchCompletion)completion;
 
