@@ -556,6 +556,8 @@ static void save_vm_list(void)
         fwprintf(f, L"NetworkMode=%d\n", g_vms[i].network_mode);
         if (g_vms[i].net_adapter[0] != L'\0')
             fwprintf(f, L"NetAdapter=%s\n", g_vms[i].net_adapter);
+        if (g_vms[i].mac_address[0])
+            fwprintf(f, L"MacAddress=%s\n", g_vms[i].mac_address);
         if (g_vms[i].resources_iso_path[0] != L'\0')
             fwprintf(f, L"ResourcesIso=%s\n", g_vms[i].resources_iso_path);
         if (g_vms[i].nat_ip[0] != '\0')
@@ -707,6 +709,8 @@ static void load_vm_list(void)
             vm->network_mode = _wtoi(line + 12);
         else if (wcsncmp(line, L"NetAdapter=", 11) == 0)
             wcscpy_s(vm->net_adapter, 256, line + 11);
+        else if (wcsncmp(line, L"MacAddress=", 11) == 0)
+            wcsncpy_s(vm->mac_address, ARRAYSIZE(vm->mac_address), line + 11, _TRUNCATE);
         else if (wcsncmp(line, L"ResourcesIso=", 13) == 0)
             wcscpy_s(vm->resources_iso_path, MAX_PATH, line + 13);
         else if (wcsncmp(line, L"NatIp=", 6) == 0)
@@ -980,6 +984,34 @@ ASB_API void asb_vm_cleanup_network(VmInstance *vm)
     vm->network_cleaned = TRUE;
 }
 
+static HRESULT ensure_vm_mac_address(VmInstance *vm)
+{
+    HRESULT hr = S_FALSE;
+    EnterCriticalSection(&g_cs);
+    if (!vm->mac_address[0]) {
+        for (;;) {
+            GUID id;
+            wchar_t address[18];
+            int i;
+            hr = CoCreateGuid(&id);
+            if (FAILED(hr)) break;
+            swprintf_s(address, ARRAYSIZE(address), L"%02X-%02X-%02X-%02X-%02X-%02X",
+                (id.Data4[2] & 0xFC) | 0x02, id.Data4[3], id.Data4[4],
+                id.Data4[5], id.Data4[6], id.Data4[7]);
+            for (i = 0; i < g_vm_count; i++) {
+                if (&g_vms[i] != vm && _wcsicmp(address, g_vms[i].mac_address) == 0)
+                    break;
+            }
+            if (i == g_vm_count) {
+                wcscpy_s(vm->mac_address, ARRAYSIZE(vm->mac_address), address);
+                break;
+            }
+        }
+    }
+    LeaveCriticalSection(&g_cs);
+    return hr;
+}
+
 /* ---- NAT IP allocation ---- */
 
 /* Allocate the next free IP in the chosen NAT /24 (see hcn_nat_subnet_base).
@@ -1029,13 +1061,14 @@ static BOOL allocate_nat_ip(VmInstance *vm)
 static HRESULT try_endpoint_with_retry(const GUID *net_id, GUID *ep_id,
                                        wchar_t *ep_guid_str, size_t str_len,
                                        char *nat_ip, size_t nat_ip_size,
-                                       BOOL is_nat)
+                                       BOOL is_nat, const wchar_t *mac_address)
 {
     HRESULT hr;
     int retry;
 
     hr = hcn_create_endpoint(net_id, ep_id, ep_guid_str, str_len,
-                              (is_nat && nat_ip && nat_ip[0]) ? nat_ip : NULL);
+                              (is_nat && nat_ip && nat_ip[0]) ? nat_ip : NULL,
+                              mac_address);
     if (SUCCEEDED(hr) || !is_nat || !nat_ip || !nat_ip[0]) return hr;
 
     asb_log(L"Endpoint failed for %S, trying next IP...", nat_ip);
@@ -1044,7 +1077,8 @@ static HRESULT try_endpoint_with_retry(const GUID *net_id, GUID *ep_id,
         if (sscanf_s(nat_ip, "%d.%d.%d.%d", &a, &b, &c, &d) != 4 || d >= 254) break;
         sprintf_s(nat_ip, nat_ip_size, "%d.%d.%d.%d", a, b, c, d + 1);
         asb_log(L"Retrying with %S...", nat_ip);
-        hr = hcn_create_endpoint(net_id, ep_id, ep_guid_str, str_len, nat_ip);
+        hr = hcn_create_endpoint(net_id, ep_id, ep_guid_str, str_len, nat_ip,
+                                  mac_address);
         if (SUCCEEDED(hr)) return hr;
     }
     return hr;
@@ -1088,7 +1122,8 @@ static DWORD WINAPI start_vm_thread(LPVOID param)
             hr = try_endpoint_with_retry(&args->network_id, &args->endpoint_id,
                                           endpoint_guid_str, 64,
                                           vm->nat_ip, sizeof(vm->nat_ip),
-                                          args->network_mode == NET_NAT);
+                                          args->network_mode == NET_NAT,
+                                          vm->mac_address);
             if (SUCCEEDED(hr) && args->network_mode == NET_NAT) save_vm_list();
             if (FAILED(hr)) {
                 asb_log(L"Error: Network endpoint failed (0x%08X).", hr);
@@ -1394,7 +1429,8 @@ static DWORD WINAPI vhdx_create_thread(LPVOID param)
                               ? sizeof(g_vms[args->vm_index].nat_ip) : 0;
             hr = try_endpoint_with_retry(&args->network_id, &args->endpoint_id,
                                           args->endpoint_guid, 64,
-                                          nat_ip, ip_size, is_nat);
+                                          nat_ip, ip_size, is_nat,
+                                          args->config.mac_address);
             if (SUCCEEDED(hr)) {
                 args->has_network = TRUE;
                 if (is_nat) save_vm_list();
@@ -1484,6 +1520,7 @@ done:
         idx = inst ? (int)(inst - g_vms) : -1;
         if (inst) {
             inst->building_vhdx = FALSE;
+            wcscpy_s(inst->mac_address, ARRAYSIZE(inst->mac_address), args->config.mac_address);
 
             if (SUCCEEDED(args->result)) {
                 VmInstance *heap_inst = args->vm_inst;
@@ -2571,7 +2608,8 @@ static DWORD WINAPI linux_create_thread(LPVOID param)
                               ? sizeof(g_vms[args->vm_index].nat_ip) : 0;
             hr = try_endpoint_with_retry(&args->network_id, &args->endpoint_id,
                                           args->endpoint_guid, 64,
-                                          nat_ip, ip_size, is_nat);
+                                          nat_ip, ip_size, is_nat,
+                                          args->config.mac_address);
             if (SUCCEEDED(hr)) {
                 args->has_network = TRUE;
                 if (is_nat) save_vm_list();
@@ -2636,6 +2674,7 @@ done:
         idx = inst ? (int)(inst - g_vms) : -1;
         if (inst) {
             inst->building_vhdx = FALSE;
+            wcscpy_s(inst->mac_address, ARRAYSIZE(inst->mac_address), args->config.mac_address);
 
             if (SUCCEEDED(args->result)) {
                 VmInstance *heap_inst = args->vm_inst;
@@ -3245,6 +3284,12 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
         cfg.network_mode = NET_NONE;
     }
 
+    if (cfg.network_mode != NET_NONE) {
+        hr = ensure_vm_mac_address(inst);
+        if (FAILED(hr)) return hr;
+        wcscpy_s(cfg.mac_address, ARRAYSIZE(cfg.mac_address), inst->mac_address);
+    }
+
     {
         wchar_t parent[MAX_PATH], default_dir[MAX_PATH];
         const wchar_t *error = resolve_disk_directory(cfg.name, config->disk_directory,
@@ -3543,7 +3588,8 @@ ASB_API HRESULT asb_vm_create(const AsbVmConfig *config)
             hr = try_endpoint_with_retry(&inst->network_id, &inst->endpoint_id,
                                           endpoint_guid_str, 64,
                                           inst->nat_ip, sizeof(inst->nat_ip),
-                                          cfg.network_mode == NET_NAT);
+                                          cfg.network_mode == NET_NAT,
+                                          inst->mac_address);
             if (SUCCEEDED(hr) && cfg.network_mode == NET_NAT) save_vm_list();
             if (FAILED(hr)) {
                 asb_log(L"Warning: Endpoint failed (0x%08X).", hr);
@@ -3622,6 +3668,11 @@ ASB_API HRESULT asb_vm_start(AsbVm vm, int snap_idx, int branch_idx,
 
     if (inst->running) { asb_log(L"VM \"%s\" is already running.", inst->name); return S_FALSE; }
     if (resolve_vm_gpu_selection(inst)) save_vm_list();
+    if (inst->network_mode != NET_NONE) {
+        HRESULT hr = ensure_vm_mac_address(inst);
+        if (FAILED(hr)) return hr;
+        if (hr == S_OK) save_vm_list();
+    }
 
     /* Switch to snapshot/base branch before booting */
     if (snap_idx >= 0 || snap_idx == -2) {
@@ -3678,6 +3729,7 @@ ASB_API HRESULT asb_vm_start(AsbVm vm, int snap_idx, int branch_idx,
         args->config.gpu_mode = inst->gpu_mode;
         wcscpy_s(args->config.gpu_id, ARRAYSIZE(args->config.gpu_id), inst->gpu_id);
         args->config.network_mode = inst->network_mode;
+        wcscpy_s(args->config.mac_address, ARRAYSIZE(args->config.mac_address), inst->mac_address);
         args->config.test_mode = inst->test_mode;
         wcscpy_s(args->config.admin_user, 128, inst->admin_user);
         args->config.ssh_enabled = inst->ssh_enabled;

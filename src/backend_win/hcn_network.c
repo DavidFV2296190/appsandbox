@@ -435,13 +435,28 @@ HRESULT hcn_create_external_network(GUID *network_id, const wchar_t *adapter_nam
     return hr;
 }
 
+static BOOL valid_mac_address(const wchar_t *address)
+{
+    size_t i;
+    if (wcslen(address) != 17) return FALSE;
+    for (i = 0; i < 17; i++) {
+        if (i % 3 == 2) {
+            if (address[i] != L'-' && address[i] != L':') return FALSE;
+        } else if (!wcschr(L"0123456789abcdefABCDEF", address[i])) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 HRESULT hcn_create_endpoint(const GUID *network_id, GUID *endpoint_id,
                             wchar_t *endpoint_guid_str, size_t str_len,
-                            const char *nat_ip)
+                            const char *nat_ip, const wchar_t *mac_address)
 {
     wchar_t net_guid_str[64];
     wchar_t ep_guid_str[64];
     wchar_t settings[1024];
+    wchar_t mac_settings[64] = L"";
     void *network = NULL;
     void *endpoint = NULL;
     PWSTR error_record = NULL;
@@ -449,6 +464,9 @@ HRESULT hcn_create_endpoint(const GUID *network_id, GUID *endpoint_id,
 
     if (!g_hcn_dll || !pfnCreateEp || !pfnOpenNet)
         return E_NOT_VALID_STATE;
+    if (!mac_address || !valid_mac_address(mac_address))
+        return E_INVALIDARG;
+    swprintf_s(mac_settings, ARRAYSIZE(mac_settings), L",\"MacAddress\":\"%s\"", mac_address);
 
     /* Open the network */
     hr = pfnOpenNet(network_id, &network, &error_record);
@@ -466,7 +484,7 @@ HRESULT hcn_create_endpoint(const GUID *network_id, GUID *endpoint_id,
             L"\"SchemaVersion\":{\"Major\":2,\"Minor\":0},"
             L"\"HostComputeNetwork\":\"%s\","
             L"\"IpConfigurations\":[{\"IpAddress\":\"%S\",\"PrefixLength\":24}]"
-            L"}", net_guid_str, nat_ip);
+            L"%s}", net_guid_str, nat_ip, mac_settings);
     } else if (IsEqualGUID(network_id, &APPSANDBOX_NAT_GUID)) {
         pick_nat_base_once();
         swprintf_s(settings, 1024,
@@ -474,14 +492,14 @@ HRESULT hcn_create_endpoint(const GUID *network_id, GUID *endpoint_id,
             L"\"SchemaVersion\":{\"Major\":2,\"Minor\":0},"
             L"\"HostComputeNetwork\":\"%s\","
             L"\"IpConfigurations\":[{\"IpAddress\":\"%S.2\",\"PrefixLength\":24}]"
-            L"}", net_guid_str, g_nat_base);
+            L"%s}", net_guid_str, g_nat_base, mac_settings);
     } else {
         /* Internal (ICS DHCP) or External (LAN DHCP) - no static IP */
         swprintf_s(settings, 1024,
             L"{"
             L"\"SchemaVersion\":{\"Major\":2,\"Minor\":0},"
             L"\"HostComputeNetwork\":\"%s\""
-            L"}", net_guid_str);
+            L"%s}", net_guid_str, mac_settings);
     }
 
     hr = pfnCreateEp(network, endpoint_id, settings, &endpoint, &error_record);

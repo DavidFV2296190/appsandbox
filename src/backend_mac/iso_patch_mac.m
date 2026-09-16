@@ -431,6 +431,7 @@ static void ensure_fetch_registry(void) {
                        ramMb:(int)ramMb
                        cpus:(int)cpus
                       diskGb:(int)diskGb
+                  macAddress:(NSString *)macAddress
                    progress:(IsoPatchProgress)progressBlock
                  completion:(IsoPatchCompletion)completion {
     NSArray *args = @[
@@ -442,6 +443,7 @@ static void ensure_fetch_registry(void) {
         @"--ram-mb",   [NSString stringWithFormat:@"%d", ramMb],
         @"--cpus",     [NSString stringWithFormat:@"%d", cpus],
         @"--disk-gb",  [NSString stringWithFormat:@"%d", diskGb],
+        @"--mac-address", macAddress,
     ];
     [self runUnprivilegedArgs:args
                      progress:progressBlock

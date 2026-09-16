@@ -39,6 +39,7 @@ typedef struct {
     int     gpu_mode;
     wchar_t gpu_id[512];
     int     network_mode;         /* NET_NONE, NET_NAT, NET_EXTERNAL, or NET_INTERNAL */
+    wchar_t mac_address[18];
     wchar_t admin_user[128];      /* Guest local admin username */
     wchar_t admin_pass[256];      /* Guest local admin password */
     wchar_t resources_iso_path[MAX_PATH]; /* ISO with autounattend + agent + helpers */
@@ -71,6 +72,7 @@ typedef struct {
     wchar_t     gpu_id[512];
     int         network_mode;
     wchar_t     net_adapter[256];     /* Adapter name for External network */
+    wchar_t     mac_address[18];
     GUID        network_id;
     GUID        endpoint_id;
     GUID        runtime_id;           /* VM RuntimeId for AF_HYPERV connections */

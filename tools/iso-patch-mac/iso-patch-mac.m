@@ -1196,6 +1196,7 @@ static VZVirtualMachine        *g_installVM = nil;
 
 static int cmd_install(int argc, char **argv) {
     NSString *name = nil, *vmDir = nil, *ipsw = nil, *diskPath = nil;
+    NSString *macAddress = nil;
     int ramMb = 0, cpus = 0, diskGb = 0;
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) name = @(argv[++i]);
@@ -1205,9 +1206,15 @@ static int cmd_install(int argc, char **argv) {
         else if (strcmp(argv[i], "--ram-mb") == 0 && i + 1 < argc) ramMb = atoi(argv[++i]);
         else if (strcmp(argv[i], "--cpus") == 0 && i + 1 < argc) cpus = atoi(argv[++i]);
         else if (strcmp(argv[i], "--disk-gb") == 0 && i + 1 < argc) diskGb = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--mac-address") == 0 && i + 1 < argc) macAddress = @(argv[++i]);
     }
     if (!name || !vmDir || !ipsw || ramMb <= 0 || cpus <= 0 || diskGb <= 0) {
         emit_error(@"install: --name --vm-dir --ipsw --ram-mb --cpus --disk-gb all required");
+        return 2;
+    }
+    VZMACAddress *mac = macAddress ? [[VZMACAddress alloc] initWithString:macAddress] : nil;
+    if (macAddress && !mac.isUnicastAddress) {
+        emit_error(@"install: invalid MAC address");
         return 2;
     }
 
@@ -1327,6 +1334,7 @@ static int cmd_install(int argc, char **argv) {
 
                 VZNATNetworkDeviceAttachment *natAtt = [[VZNATNetworkDeviceAttachment alloc] init];
                 VZVirtioNetworkDeviceConfiguration *netCfg = [[VZVirtioNetworkDeviceConfiguration alloc] init];
+                if (mac) netCfg.MACAddress = mac;
                 netCfg.attachment = natAtt;
                 config.networkDevices = @[netCfg];
 

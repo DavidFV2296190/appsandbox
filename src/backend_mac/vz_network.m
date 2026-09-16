@@ -2,13 +2,15 @@
 
 @implementation VzNetwork
 
-+ (VZVirtioNetworkDeviceConfiguration *)natConfiguration {
++ (VZVirtioNetworkDeviceConfiguration *)natConfigurationWithMACAddress:(VZMACAddress *)macAddress {
     VZVirtioNetworkDeviceConfiguration *net = [[VZVirtioNetworkDeviceConfiguration alloc] init];
+    net.MACAddress = macAddress;
     net.attachment = [[VZNATNetworkDeviceAttachment alloc] init];
     return net;
 }
 
-+ (VZVirtioNetworkDeviceConfiguration *)bridgedConfigurationForInterface:(NSString *)interfaceName {
++ (VZVirtioNetworkDeviceConfiguration *)bridgedConfigurationForInterface:(NSString *)interfaceName
+                                                            MACAddress:(VZMACAddress *)macAddress {
     NSArray<VZBridgedNetworkInterface *> *interfaces = [VZBridgedNetworkInterface networkInterfaces];
     VZBridgedNetworkInterface *chosen = nil;
     if (interfaceName.length > 0) {
@@ -24,6 +26,7 @@
     if (!chosen) return nil;
 
     VZVirtioNetworkDeviceConfiguration *net = [[VZVirtioNetworkDeviceConfiguration alloc] init];
+    net.MACAddress = macAddress;
     net.attachment = [[VZBridgedNetworkDeviceAttachment alloc] initWithInterface:chosen];
     return net;
 }

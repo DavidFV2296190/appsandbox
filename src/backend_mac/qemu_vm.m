@@ -27,6 +27,7 @@
 @property (nonatomic, strong) NSURL *vmDir;
 @property (nonatomic, assign) int ramMb;
 @property (nonatomic, assign) int cpuCores;
+@property (nonatomic, copy) NSString *macAddress;
 @property (nonatomic, assign) BOOL testMode;
 @property (nonatomic, assign, readwrite) QemuVmState state;
 @property (nonatomic, strong, readwrite) AsbIvshmemTransport *transport;
@@ -40,12 +41,14 @@
                        vmDir:(NSURL *)vmDir
                        ramMb:(int)ramMb
                     cpuCores:(int)cpuCores
+                  macAddress:(NSString *)macAddress
                     testMode:(BOOL)testMode {
     if ((self = [super init])) {
         _name = [name copy];
         _vmDir = vmDir;
         _ramMb = ramMb > 0 ? ramMb : 4096;
         _cpuCores = cpuCores > 0 ? cpuCores : 4;
+        _macAddress = [macAddress copy];
         _testMode = testMode;
         _state = QemuVmStateStopped;
     }
@@ -202,14 +205,6 @@
     self.monitorPort = [self allocLoopbackPort];
     if (self.monitorPort <= 0) { done([self err:@"could not allocate a monitor port"]); return; }
 
-    /* Stable per-VM MAC: locally-administered 52:54:00 OUI + 3 bytes of an FNV-1a hash of the VM
-     * name. Concurrent VMs share the vmnet-shared L2 bridge, so they must not collide on QEMU's
-     * fixed default NIC MAC (52:54:00:12:34:56). */
-    uint32_t macHash = 2166136261u;
-    for (const char *p = self.name.UTF8String; *p; p++) { macHash = (macHash ^ (uint8_t)*p) * 16777619u; }
-    NSString *guestMac = [NSString stringWithFormat:@"52:54:00:%02x:%02x:%02x",
-                          (macHash >> 16) & 0xff, (macHash >> 8) & 0xff, macHash & 0xff];
-
     /* argv mirrors the validated dev boot script, parameterized. No GPU; no swtpm/TPM (ARM Windows
      * HCS exposes none, hcs_vm.c); HvSocket replaced by ivshmem-plain; -display none (the VDD is the
      * display over ch2). Networking is vmnet-shared (Apple NAT): the guest gets a routable private IP
@@ -245,7 +240,7 @@
          * Win11 ARM64 binds as a COM port instead of a NIC. Stable per-VM MAC for a consistent DHCP
          * lease on the shared bridge.
          * (see [[windows-on-mac-networking]].) */
-        @"-device", [NSString stringWithFormat:@"virtio-net-pci,netdev=net0,romfile=,mac=%@", guestMac],
+        @"-device", [NSString stringWithFormat:@"virtio-net-pci,netdev=net0,romfile=,mac=%@", self.macAddress],
         @"-display", @"none",
         @"-rtc", @"base=localtime",
         @"-monitor", [NSString stringWithFormat:@"tcp:127.0.0.1:%d,server,nowait", self.monitorPort],

@@ -108,6 +108,25 @@ static int vm_index_of(const char *name) {
     return -1;
 }
 
+static VZMACAddress *vm_mac_address(AsbVmMac *vm) {
+    if (!vm->mac_address[0]) {
+        BOOL duplicate;
+        do {
+            strlcpy(vm->mac_address, [VZMACAddress randomLocallyAdministeredAddress].string.UTF8String,
+                    sizeof(vm->mac_address));
+            duplicate = NO;
+            for (int i = 0; i < g_vm_count; i++) {
+                if (&g_vms[i] != vm && strcasecmp(g_vms[i].mac_address, vm->mac_address) == 0) {
+                    duplicate = YES;
+                    break;
+                }
+            }
+        } while (duplicate);
+    }
+    VZMACAddress *mac = [[VZMACAddress alloc] initWithString:@(vm->mac_address)];
+    return mac.isUnicastAddress ? mac : nil;
+}
+
 /* ---- Persistence ---- */
 
 static NSURL *config_file_url(void) {
@@ -195,6 +214,8 @@ static void save_vm_list(void) {
         fprintf(f, "CpuCores=%d\n", g_vms[i].cpu_cores);
         fprintf(f, "GpuMode=%d\n", g_vms[i].gpu_mode);
         fprintf(f, "NetworkMode=%d\n", g_vms[i].network_mode);
+        if (g_vms[i].mac_address[0])
+            fprintf(f, "MacAddress=%s\n", g_vms[i].mac_address);
         if (g_vms[i].test_mode)
             fprintf(f, "TestMode=1\n");
         if (g_vms[i].admin_user[0])
@@ -275,6 +296,8 @@ static void load_vm_list(void) {
         }
         else if (strncmp(line, "NetworkMode=", 12) == 0)
             vm->network_mode = atoi(line + 12);
+        else if (strncmp(line, "MacAddress=", 11) == 0)
+            strlcpy(vm->mac_address, line + 11, sizeof(vm->mac_address));
         else if (strncmp(line, "TestMode=", 9) == 0)
             vm->test_mode = (atoi(line + 9) != 0);
         else if (strncmp(line, "AdminUser=", 10) == 0)
@@ -1007,6 +1030,7 @@ static void start_install_flow(int idx, NSURL *restoreURL) {
                                 ramMb:ramMb
                                  cpus:cpus
                                diskGb:hddGb
+                           macAddress:@(g_vms[idx].mac_address)
                              progress:^(double frac, NSString *stage) {
         int i = vm_index_of(nsName.UTF8String);
         if (i >= 0) update_install_progress(i, frac, stage);
@@ -1211,6 +1235,7 @@ int asb_mac_vm_create(const char *name, const char *os_type,
     vm->cpu_cores = cpu_cores > 0 ? cpu_cores : 4;
     vm->gpu_mode = gpu_mode;
     vm->network_mode = network_mode;
+    vm_mac_address(vm);
     vm->test_mode = test_mode;   /* honored at start (Windows guest); not forced */
     strlcpy(vm->admin_user, username.UTF8String, sizeof(vm->admin_user));
     strlcpy(vm->admin_pass, admin_pass, sizeof(vm->admin_pass));
@@ -1311,6 +1336,13 @@ int asb_mac_vm_start(const char *name) {
         post_alert(name, "Cannot start: disk is not built yet");
         return BACKEND_ERR_FAILED;
     }
+    BOOL needsMac = !g_vms[idx].mac_address[0];
+    VZMACAddress *macAddress = vm_mac_address(&g_vms[idx]);
+    if (!macAddress) {
+        post_alert(name, "Invalid saved MAC address");
+        return BACKEND_ERR_INVALID_ARG;
+    }
+    if (needsMac) save_vm_list();
 
     /* ---- Windows guest: launch via QEMU+HVF + ivshmem (not VZ). testMode (Secure Boot off + test
        signing on) is the create-time choice in g_vms[].test_mode — NOT forced. Our guest drivers are
@@ -1323,6 +1355,7 @@ int asb_mac_vm_start(const char *name) {
                                              vmDir:vmDir
                                              ramMb:g_vms[idx].ram_mb
                                           cpuCores:g_vms[idx].cpu_cores
+                                        macAddress:macAddress.string
                                           testMode:g_vms[idx].test_mode];
         g_qemu_refs[idx] = qvm;
         qvm.onLog = ^(NSString *l) { post_diag("[%s] qemu: %s", nsName.UTF8String, l.UTF8String); };
@@ -1363,6 +1396,7 @@ int asb_mac_vm_start(const char *name) {
     VzVm *vm = [VzVm loadVmNamed:nsName
                             ramMb:g_vms[idx].ram_mb
                          cpuCores:g_vms[idx].cpu_cores
+                       macAddress:macAddress
                             error:&err];
     if (!vm) {
         post_log("[%s] Load failed: %s", name,

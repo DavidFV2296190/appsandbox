@@ -26,6 +26,7 @@ void vz_vm_set_no_audio(BOOL no_audio);
 + (nullable VzVm *)loadVmNamed:(NSString *)name
                          ramMb:(int)ramMb
                       cpuCores:(int)cpuCores
+                    macAddress:(VZMACAddress *)macAddress
                          error:(NSError **)error;
 
 /* Build a fresh configuration for install (no disks are loaded from disk.img;
@@ -36,6 +37,7 @@ void vz_vm_set_no_audio(BOOL no_audio);
                                                   machineIdentifier:(VZMacMachineIdentifier *)machineId
                                                               ramMb:(int)ramMb
                                                            cpuCount:(int)cpuCount
+                                                         macAddress:(VZMACAddress *)macAddress
                                                               error:(NSError **)error;
 
 - (void)startWithCompletion:(void (^)(NSError * _Nullable))completion;

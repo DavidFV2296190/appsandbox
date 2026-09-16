@@ -57,7 +57,7 @@ HRESULT hcn_create_external_network(GUID *network_id, const wchar_t *adapter_nam
            Internal and External networks (which always use DHCP). */
 HRESULT hcn_create_endpoint(const GUID *network_id, GUID *endpoint_id,
                             wchar_t *endpoint_guid_str, size_t str_len,
-                            const char *nat_ip);
+                            const char *nat_ip, const wchar_t *mac_address);
 
 /* Delete a network by GUID. */
 ASB_API HRESULT hcn_delete_network(const GUID *network_id);

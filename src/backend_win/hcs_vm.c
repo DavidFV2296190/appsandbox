@@ -935,9 +935,10 @@ BOOL hcs_build_vm_json(const VmConfig *config, const wchar_t *endpoint_guid,
     /* Network adapter — skip for template VMs (no network during template creation) */
     net_section[0] = L'\0';
     if (endpoint_guid && endpoint_guid[0] != L'\0' && !config->is_template) {
+        if (!config->mac_address[0]) return FALSE;
         swprintf_s(net_section, 512,
-            L",\"NetworkAdapters\":{\"Default\":{\"EndpointId\":\"%s\"}}",
-            endpoint_guid);
+            L",\"NetworkAdapters\":{\"Default\":{\"EndpointId\":\"%s\",\"MacAddress\":\"%s\"}}",
+            endpoint_guid, config->mac_address);
     }
 
     /* Secure Boot — uses ApplySecureBootTemplate + SecureBootTemplateId
