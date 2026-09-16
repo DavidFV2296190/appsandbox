@@ -928,7 +928,10 @@ HRESULT iso_create_resources(const wchar_t *iso_path,
                 "@echo off\r\n"
                 "set LOG=%SystemRoot%\\AppSandbox\\setup.log\r\n"
                 "mkdir \"%SystemRoot%\\AppSandbox\" 2>nul\r\n"
-                "echo === setup.cmd started === >> \"%LOG%\"\r\n"
+                "echo === setup.cmd started === >> \"%LOG%\"\r\n",
+                cmd);
+            asb_provision_login_setup(cmd);
+            fputs(
                 "\r\n"
                 "REM Install guest agent\r\n"
                 "if exist \"%~dp0appsandbox-agent.exe\" (\r\n"
@@ -1436,7 +1439,10 @@ static void stage_agent_and_setup(const wchar_t *staging, const wchar_t *res_dir
                 "@echo off\r\n"
                 "set LOG=%SystemRoot%\\AppSandbox\\setup.log\r\n"
                 "mkdir \"%SystemRoot%\\AppSandbox\" 2>nul\r\n"
-                "echo === instance setup.cmd started === >> \"%LOG%\"\r\n"
+                "echo === instance setup.cmd started === >> \"%LOG%\"\r\n",
+                cmd);
+            asb_provision_login_setup(cmd);
+            fputs(
                 "\r\n"
                 "REM Install guest agent\r\n"
                 "if exist \"%~dp0appsandbox-agent.exe\" (\r\n"

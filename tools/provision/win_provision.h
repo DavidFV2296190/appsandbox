@@ -34,6 +34,8 @@ int asb_provision_unattend(FILE *f, const char *vm_name, const char *user, const
 /* setup.cmd -- first-logon: agent already staged at C:\Windows\AppSandbox\; register the service. */
 int asb_provision_setup_cmd(FILE *f);
 
+int asb_provision_login_setup(FILE *f);
+
 /* SetupComplete.cmd -- runs as SYSTEM before first logon: trust the test cert, install AppSandboxSHM
  * (pnputil; no-op on Win-to-Win), install the VDD + VAD root devices (devcon), disable display sleep,
  * and -- if ssh_msi_name is non-NULL -- install OpenSSH Server (msiexec + sc + net start).

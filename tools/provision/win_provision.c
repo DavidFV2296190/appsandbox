@@ -265,12 +265,27 @@ int asb_provision_unattend(FILE *f, const char *vm_name, const char *user, const
     return 0;
 }
 
+int asb_provision_login_setup(FILE *f) {
+    if (!f) return -1;
+    fputs(
+        "powershell.exe -NoProfile -Command \""
+        "Set-LocalUser -SID ([System.Security.Principal.WindowsIdentity]::GetCurrent().User) -PasswordNeverExpires $true; "
+        "$key = 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon'; "
+        "Remove-ItemProperty -Path $key -Name AutoLogonCount -ErrorAction SilentlyContinue; "
+        "Set-ItemProperty -Path $key -Name AutoAdminLogon -Value '1'\" >> \"%LOG%\" 2>&1\r\n",
+        f);
+    return ferror(f) ? -1 : 0;
+}
+
 int asb_provision_setup_cmd(FILE *f) {
     if (!f) return -1;
     fputs(
         "@echo off\r\n"
         "set LOG=%SystemRoot%\\AppSandbox\\setup.log\r\n"
-        "echo === setup.cmd started === >> \"%LOG%\"\r\n"
+        "echo === setup.cmd started === >> \"%LOG%\"\r\n",
+        f);
+    if (asb_provision_login_setup(f) != 0) return -1;
+    fputs(
         "REM Agent already staged at C:\\Windows\\AppSandbox\\ by the disk builder\r\n"
         "\"%SystemRoot%\\AppSandbox\\appsandbox-agent.exe\" --install >> \"%LOG%\" 2>&1\r\n"
         "echo === setup.cmd finished === >> \"%LOG%\"\r\n",
