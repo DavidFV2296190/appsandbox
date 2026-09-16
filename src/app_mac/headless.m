@@ -392,7 +392,7 @@ static NSString *validate_create_mac(NSString *name, NSString *os,
     }
     if (hdd_gb != 0 && hdd_gb < 1)       return @"Disk size must be at least 1 GB.";
     if (cpu_cores != 0 && cpu_cores < 1) return @"CPU cores must be at least 1.";
-    if (gpu_mode < 0 || gpu_mode > 2)    return @"gpuMode must be 0 (None), 1 (Default), or 2 (Try all).";
+    if (gpu_mode < 0 || gpu_mode > 1)    return @"gpuMode must be 0 (None) or 1 (Default).";
     if (net_mode < 0 || net_mode > 3)    return @"networkMode must be 0 (None), 1 (NAT), 2 (External), or 3 (Internal).";
 
     return [VmDir validationErrorForDiskDirectory:disk_directory vmName:name];
@@ -835,9 +835,9 @@ static int handle_request(int fd, HttpReq *r) {
                 }
                 if (b[@"gpuMode"]) {
                     int iv = [b[@"gpuMode"] intValue];
-                    if (iv < 0 || iv > 2) {
+                    if (iv < 0 || iv > 1) {
                         send_err(fd, 400, "Bad Request", @"invalid_arg",
-                                 @"gpuMode must be 0 (None), 1 (Default), or 2 (Try all)");
+                                 @"gpuMode must be 0 (None) or 1 (Default)");
                         return 0;
                     }
                 }

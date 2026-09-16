@@ -203,6 +203,9 @@ function onVmStateChanged(msg) {
 function updateHostInfo(info) {
     if (!info) return;
     var previousDefault = lastHostInfo && lastHostInfo.defaultDiskDirectory;
+    if (!hostBridge.isMac && Array.isArray(info.gpus) &&
+        JSON.stringify(info.gpus) !== JSON.stringify(lastHostInfo && lastHostInfo.gpus))
+        populateGpus(info.gpus);
     lastHostInfo = info;
     var diskDirectory = document.getElementById('disk-directory');
     if (diskDirectoryBeforeEdit === null && info.defaultDiskDirectory &&
@@ -222,6 +225,49 @@ function updateHostInfo(info) {
             refreshDiskSpaceInfo(true);
     }
 }
+
+function gpuSelectionValue(selection) {
+    return selection.gpuMode === 1 && selection.gpuId ? 'gpu:' + selection.gpuId : String(selection.gpuMode);
+}
+
+function selectedGpu(id) {
+    var value = document.getElementById(id).value;
+    return value.indexOf('gpu:') === 0 ?
+        { gpuMode: 1, gpuId: value.slice(4) } : { gpuMode: Number(value), gpuId: '' };
+}
+
+function updateGpuTitle(select) {
+    var option = select.options[select.selectedIndex];
+    select.title = option ? (option.title || option.textContent) : '';
+}
+
+function setGpuSelection(id, selection) {
+    var select = document.getElementById(id);
+    select.value = gpuSelectionValue(selection);
+    if (select.selectedIndex < 0) select.value = '1';
+    updateGpuTitle(select);
+}
+
+function populateGpus(gpus) {
+    ['gpu-mode', 'edit-gpu-mode'].forEach(function(id) {
+        var select = document.getElementById(id);
+        var selection = selectedGpu(id);
+        while (select.options.length > 2) select.remove(2);
+        gpus.forEach(function(gpu) {
+            if (!gpu.id) return;
+            var option = document.createElement('option');
+            option.value = 'gpu:' + gpu.id;
+            option.textContent = gpu.name;
+            option.title = gpu.location ? gpu.name + '\n' + gpu.location : gpu.name;
+            select.appendChild(option);
+        });
+        setGpuSelection(id, selection);
+    });
+}
+
+['gpu-mode', 'edit-gpu-mode'].forEach(function(id) {
+    document.getElementById(id).addEventListener('change', function() { updateGpuTitle(this); });
+});
 
 function selectedDiskDirectory() {
     return document.getElementById('disk-directory').value.trim() ||
@@ -584,6 +630,7 @@ onNetModeChange();
 
 function gatherConfig() {
     var osType = document.getElementById('os-type').value;
+    var gpu = selectedGpu('gpu-mode');
     /* Same ISO-picker path for Windows and Linux. The cloud-image
        Linux-version dropdown is dormant (see applyOsTypeUI). */
     var imagePath = document.getElementById('image-path').value.trim();
@@ -599,7 +646,8 @@ function gatherConfig() {
         hddGb:       document.getElementById('hdd-size').valueAsNumber,
         ramMb:       alignRamMb(document.getElementById('ram-size').valueAsNumber),
         cpuCores:    document.getElementById('cpu-cores').valueAsNumber,
-        gpuMode:     parseInt(document.getElementById('gpu-mode').value),
+        gpuMode:     gpu.gpuMode,
+        gpuId:       gpu.gpuId,
         networkMode: hostBridge.isMac ? 1 : parseInt(document.getElementById('net-mode').value),
         netAdapter:  hostBridge.isMac ? '' : document.getElementById('net-adapter').value,
         adminUser:   document.getElementById('admin-user').value.trim(),
@@ -767,7 +815,7 @@ function openCreateModal() {
     revalidateDiskDirectory();
     selectTemplate('', templateDefaultLabel());
     document.getElementById('hdd-size').value = 64;
-    document.getElementById('gpu-mode').value = '1';
+    setGpuSelection('gpu-mode', { gpuMode: 1 });
     document.getElementById('net-mode').value = '1';
     document.getElementById('admin-user').value = 'user';
     document.getElementById('admin-pass').value = 'test123';
@@ -977,7 +1025,7 @@ function buildRowCells(vm, i, statusTd) {
         makeCell(vm.cpuCores, 'Number of virtual CPU cores assigned to this VM'),
         makeCell(vm.ramMb + ' MB', 'Memory allocated to this VM, in megabytes'),
         makeCell(vm.hddGb + ' GB', 'Virtual disk size, in gigabytes'),
-        makeCell(vm.gpuName || (vm.gpuMode === 2 ? 'Try all' : vm.gpuMode === 1 ? 'Default GPU' : 'None'),
+        makeCell(vm.gpuName || (vm.gpuMode === 1 ? 'Default GPU' : 'None'),
             hostBridge.isMac && vm.osType === 'Windows'
                 ? 'Windows software rendering (WARP) on the CPU'
                 : 'GPU passed through to the VM via GPU-PV, or None'),
@@ -1060,7 +1108,7 @@ function renderVmTable() {
             vm.installComplete, vm.isTemplate,
             vm.sshEnabled, vm.sshState, vm.sshPort,
             vm.osType, vm.ramMb, vm.hddGb, vm.cpuCores,
-            vm.gpuMode, vm.gpuName, vm.networkMode,
+            vm.gpuMode, vm.gpuId, vm.gpuName, vm.networkMode,
             selectedSnap.get(vm.name) || 'current',
             /* Snapshot tree: take/delete/rename/branch must trigger a row rebuild
                so makeSnapCell re-runs. These fields only change on user snapshot
@@ -1153,7 +1201,7 @@ function openEditVmModal(idx) {
     document.getElementById('edit-ram-size').value = vm.ramMb;
     document.getElementById('edit-ram-size').min = hostBridge.isMac ? 512 : 4000;
     document.getElementById('edit-cpu-cores').value = vm.cpuCores;
-    document.getElementById('edit-gpu-mode').value = String(vm.gpuMode);
+    setGpuSelection('edit-gpu-mode', vm);
     document.getElementById('edit-net-mode').value = String(vm.networkMode);
     updateEditVmModal();
     document.getElementById('edit-vm-overlay').classList.add('active');
@@ -1183,7 +1231,7 @@ function editVmValues() {
         cpuCores: document.getElementById('edit-cpu-cores').valueAsNumber
     };
     if (!hostBridge.isMac) {
-        values.gpuMode = Number(document.getElementById('edit-gpu-mode').value);
+        Object.assign(values, selectedGpu('edit-gpu-mode'));
         values.networkMode = Number(document.getElementById('edit-net-mode').value);
     }
     return values;
@@ -1220,13 +1268,19 @@ function saveEditVm() {
     var idx = vmIndexByName(editVmState.name);
     var values = editVmValues();
     if (values.ramMb !== editVmState.initial.ramMb) values.ramMb = alignRamMb(values.ramMb);
+    var gpuChanged = !hostBridge.isMac &&
+        gpuSelectionValue(values) !== gpuSelectionValue(editVmState.initial) &&
+        gpuSelectionValue(values) !== gpuSelectionValue(vms[idx]);
     var fields = Object.keys(values).filter(function(field) {
-        return values[field] !== editVmState.initial[field] && values[field] !== vms[idx][field];
+        return field !== 'gpuMode' && field !== 'gpuId' &&
+            values[field] !== editVmState.initial[field] && values[field] !== vms[idx][field];
     });
     closeEditVmModal();
     fields.forEach(function(field) {
         sendCmd('editVm', { vmIndex: idx, field: field, value: String(values[field]) });
     });
+    if (gpuChanged)
+        sendCmd('editVm', { vmIndex: idx, field: 'gpuMode', value: String(values.gpuMode), gpuId: values.gpuId });
 }
 
 document.getElementById('edit-vm-overlay').addEventListener('input', updateEditVmModal);

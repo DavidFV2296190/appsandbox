@@ -215,6 +215,7 @@ static void build_host_info_json(JsonBuilder *jb)
 {
     SYSTEM_INFO si;
     MEMORYSTATUSEX ms;
+    GpuList *gpu_list = asb_gpu_list();
     DWORD host_cores, host_ram_mb;
     DWORD vm_cores = 0, vm_ram_mb = 0, vm_hdd_gb = 0;
     wchar_t base_dir[MAX_PATH];
@@ -243,6 +244,16 @@ static void build_host_info_json(JsonBuilder *jb)
     jb_int(jb, L"freeGb", free_gb);
     jb_int(jb, L"vmHddGb", (int)vm_hdd_gb);
     jb_string(jb, L"defaultDiskDirectory", base_dir);
+    jb_array_begin(jb, L"gpus");
+    for (i = 0; gpu_list && i < gpu_list->count; i++) {
+        if (i > 0) jb_append(jb, L",");
+        jb_object_begin(jb);
+        jb_string(jb, L"id", gpu_list->gpus[i].interface_path);
+        jb_string(jb, L"name", gpu_list->gpus[i].name);
+        jb_string(jb, L"location", gpu_list->gpus[i].location);
+        jb_object_end(jb);
+    }
+    jb_array_end(jb);
 }
 
 static ULONGLONG get_file_size_bytes(const wchar_t *path)
@@ -286,6 +297,7 @@ static void build_vm_json(JsonBuilder *jb, int i)
     jb_int(jb, L"hddGb", (int)v->hdd_gb);
     jb_int(jb, L"cpuCores", (int)v->cpu_cores);
     jb_int(jb, L"gpuMode", v->gpu_mode);
+    jb_string(jb, L"gpuId", v->gpu_id);
     jb_string(jb, L"gpuName", v->gpu_name);
     jb_int(jb, L"networkMode", v->network_mode);
     jb_string(jb, L"netAdapter", v->net_adapter);
@@ -387,11 +399,11 @@ static void build_vm_json(JsonBuilder *jb, int i)
 
 static void send_vm_list(void)
 {
-    wchar_t buf[32768];
+    wchar_t buf[131072];
     JsonBuilder jb;
     int i, count = asb_vm_count();
 
-    jb_init(&jb, buf, 32768);
+    jb_init(&jb, buf, ARRAYSIZE(buf));
     jb_object_begin(&jb);
     jb_string(&jb, L"type", L"vmListChanged");
 
@@ -403,9 +415,9 @@ static void send_vm_list(void)
     jb_array_end(&jb);
 
     {
-        wchar_t hi_buf[2048];
+        wchar_t hi_buf[32768];
         JsonBuilder hi;
-        jb_init(&hi, hi_buf, 2048);
+        jb_init(&hi, hi_buf, ARRAYSIZE(hi_buf));
         jb_object_begin(&hi);
         build_host_info_json(&hi);
         jb_object_end(&hi);
@@ -421,9 +433,9 @@ static void send_vm_list(void)
 
 static void send_host_info(void)
 {
-    wchar_t buf[2048];
+    wchar_t buf[32768];
     JsonBuilder jb;
-    jb_init(&jb, buf, 2048);
+    jb_init(&jb, buf, ARRAYSIZE(buf));
     jb_object_begin(&jb);
     jb_string(&jb, L"type", L"hostInfo");
     build_host_info_json(&jb);
@@ -517,11 +529,11 @@ static int CALLBACK disk_folder_browse_callback(HWND hwnd, UINT message, LPARAM 
 
 static void send_full_state(void)
 {
-    wchar_t buf[32768];
+    wchar_t buf[131072];
     JsonBuilder jb;
     int i, count;
 
-    jb_init(&jb, buf, 32768);
+    jb_init(&jb, buf, ARRAYSIZE(buf));
     jb_object_begin(&jb);
     jb_string(&jb, L"type", L"fullState");
 
@@ -535,9 +547,9 @@ static void send_full_state(void)
 
     /* Host info */
     {
-        wchar_t hi[2048];
+        wchar_t hi[32768];
         JsonBuilder hj;
-        jb_init(&hj, hi, 2048);
+        jb_init(&hj, hi, ARRAYSIZE(hi));
         jb_object_begin(&hj);
         build_host_info_json(&hj);
         jb_object_end(&hj);
@@ -987,6 +999,7 @@ static void on_webview2_message(const wchar_t *json)
         wchar_t name_buf[256] = {0}, os_buf[32] = {0}, img_buf[MAX_PATH] = {0};
         wchar_t tpl_buf[256] = {0}, user_buf[128] = {0}, pass_buf[256] = {0};
         wchar_t adapter_buf[256] = {0}, disk_buf[MAX_PATH + 1] = {0};
+        wchar_t gpu_id[512] = {0};
         int val;
         BOOL is_tpl = FALSE;
 
@@ -1018,6 +1031,12 @@ static void on_webview2_message(const wchar_t *json)
             return;
         }
         json_get_string(json, L"netAdapter", adapter_buf, 256);
+        if (!json_get_string(json, L"gpuId", gpu_id, ARRAYSIZE(gpu_id)) &&
+            json_has_key(json, L"gpuId")) {
+            SecureZeroMemory(pass_buf, sizeof(pass_buf));
+            ui_show_alert(L"GPU selection is invalid or too long.");
+            return;
+        }
         if (!json_get_string(json, L"diskDirectory", disk_buf, MAX_PATH + 1) &&
             json_has_key(json, L"diskDirectory")) {
             ui_show_alert(L"Disk folder is invalid or too long.");
@@ -1035,6 +1054,7 @@ static void on_webview2_message(const wchar_t *json)
         cfg.net_adapter = adapter_buf;
         cfg.is_template = is_tpl;
         cfg.disk_directory = disk_buf;
+        cfg.gpu_id = gpu_id;
 
         if (json_get_int(json, L"hddGb", &val)) cfg.hdd_gb = (DWORD)val;
         if (json_get_int(json, L"ramMb", &val)) cfg.ram_mb = (DWORD)val;
@@ -1045,6 +1065,14 @@ static void on_webview2_message(const wchar_t *json)
         json_get_bool(json, L"sshEnabled", &cfg.ssh_enabled);
         json_get_bool(json, L"sshDeployKey", &cfg.ssh_deploy_key);
 
+        {
+            const wchar_t *error = asb_validate_gpu_selection(cfg.gpu_mode, cfg.gpu_id);
+            if (error) {
+                SecureZeroMemory(pass_buf, sizeof(pass_buf));
+                ui_show_alert(error);
+                return;
+            }
+        }
         asb_vm_create(&cfg);
         SecureZeroMemory(pass_buf, sizeof(pass_buf));
         send_vm_list();
@@ -1179,12 +1207,22 @@ static void on_webview2_message(const wchar_t *json)
                 ui_show_alert(L"VM settings can only be changed when the VM is stopped and its disk build has finished.");
             } else {
                 HRESULT hr = E_INVALIDARG;
+                const wchar_t *error = NULL;
                 if (wcscmp(field, L"name") == 0) hr = asb_vm_set_name(vm, value);
                 else if (wcscmp(field, L"ramMb") == 0) hr = asb_vm_set_ram(vm, (DWORD)_wtoi(value));
                 else if (wcscmp(field, L"cpuCores") == 0) hr = asb_vm_set_cpu(vm, (DWORD)_wtoi(value));
-                else if (wcscmp(field, L"gpuMode") == 0) hr = asb_vm_set_gpu(vm, _wtoi(value));
+                else if (wcscmp(field, L"gpuMode") == 0) {
+                    wchar_t gpu_id[512] = {0};
+                    int mode = _wtoi(value);
+                    if (!json_get_string(json, L"gpuId", gpu_id, ARRAYSIZE(gpu_id)) &&
+                        json_has_key(json, L"gpuId"))
+                        error = L"GPU selection is invalid or too long.";
+                    else
+                        error = asb_validate_gpu_selection(mode, gpu_id);
+                    if (!error) hr = asb_vm_set_gpu_selection(vm, mode, gpu_id);
+                }
                 else if (wcscmp(field, L"networkMode") == 0) hr = asb_vm_set_network(vm, _wtoi(value));
-                if (FAILED(hr)) ui_show_alert(L"VM configuration could not be updated.");
+                if (FAILED(hr)) ui_show_alert(error ? error : L"VM configuration could not be updated.");
                 else asb_save();
             }
         } else {

@@ -269,8 +269,10 @@ static void load_vm_list(void) {
             vm->hdd_gb = atoi(line + 6);
         else if (strncmp(line, "CpuCores=", 9) == 0)
             vm->cpu_cores = atoi(line + 9);
-        else if (strncmp(line, "GpuMode=", 8) == 0)
+        else if (strncmp(line, "GpuMode=", 8) == 0) {
             vm->gpu_mode = atoi(line + 8);
+            if (vm->gpu_mode == 2) vm->gpu_mode = 1;
+        }
         else if (strncmp(line, "NetworkMode=", 12) == 0)
             vm->network_mode = atoi(line + 12);
         else if (strncmp(line, "TestMode=", 9) == 0)
@@ -1141,7 +1143,8 @@ int asb_mac_vm_create(const char *name, const char *os_type,
                        BOOL ssh_enabled,
                        BOOL ssh_deploy_key,
                        BOOL test_mode) {
-    if (!name || !os_type) return BACKEND_ERR_INVALID_ARG;
+    if (!name || !os_type || gpu_mode < 0 || gpu_mode > 1)
+        return BACKEND_ERR_INVALID_ARG;
     NSString *username = admin_user ? [NSString stringWithUTF8String:admin_user] : nil;
     NSString *usernameError = (admin_user && !username)
         ? @"Username contains invalid Unicode."
@@ -1714,7 +1717,9 @@ int asb_mac_vm_edit(const char *name, const char *field, const char *value) {
     } else if (strcmp(field, "cpuCores") == 0) {
         g_vms[idx].cpu_cores = atoi(value);
     } else if (strcmp(field, "gpuMode") == 0) {
-        g_vms[idx].gpu_mode = atoi(value);
+        int gpu_mode = atoi(value);
+        if (gpu_mode < 0 || gpu_mode > 1) return BACKEND_ERR_INVALID_ARG;
+        g_vms[idx].gpu_mode = gpu_mode;
     } else if (strcmp(field, "networkMode") == 0) {
         g_vms[idx].network_mode = atoi(value);
     } else {

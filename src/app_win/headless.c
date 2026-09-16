@@ -224,7 +224,7 @@ static int append_json_str(char *out, int cap, int pos, const char *s)
 
 static int append_wstr(char *out, int cap, int pos, const wchar_t *w)
 {
-    char u[1024] = {0};
+    char u[1536] = {0};
     WideCharToMultiByte(CP_UTF8, 0, w, -1, u, sizeof(u), NULL, NULL);
     return append_json_str(out, cap, pos, u);
 }
@@ -254,7 +254,7 @@ static int append_vm_json(char *out, int cap, int pos, VmInstance *v)
         ",\"state\":\"%s\",\"running\":%s,\"agentOnline\":%s,\"installComplete\":%s,"
         "\"building\":%s,\"progress\":%d,\"sshState\":%d,\"sshPort\":%lu,"
         "\"ramMb\":%lu,\"hddGb\":%lu,\"cpuCores\":%lu,\"gpuMode\":%d,\"networkMode\":%d,"
-        "\"displayOpen\":%s}",
+        "\"displayOpen\":%s,\"gpuId\":",
         derive_state(v),
         v->running ? "true" : "false", v->agent_online ? "true" : "false",
         v->install_complete ? "true" : "false", v->building_vhdx ? "true" : "false",
@@ -264,12 +264,17 @@ static int append_vm_json(char *out, int cap, int pos, VmInstance *v)
         (unsigned long)v->ram_mb, (unsigned long)v->hdd_gb, (unsigned long)v->cpu_cores,
         v->gpu_mode, v->network_mode,
         display_is_open(v->unique_id) ? "true" : "false");
+    pos = append_wstr(out, cap, pos, v->gpu_id);
+    pos += sprintf_s(out + pos, cap - pos, ",\"gpuName\":");
+    pos = append_wstr(out, cap, pos, v->gpu_name);
+    pos += sprintf_s(out + pos, cap - pos, "}");
     return pos;
 }
 
 static int build_host_info(char *buf, int cap)
 {
     SYSTEM_INFO si; MEMORYSTATUSEX ms; ULARGE_INTEGER freeB;
+    const GpuList *gpus = asb_gpu_list();
     wchar_t pd[MAX_PATH];
     int i, count, pos, vmCores = 0, vmRamMb = 0, vmHddGb = 0;
     GetSystemInfo(&si);
@@ -292,7 +297,18 @@ static int build_host_info(char *buf, int cap)
         vmCores, vmRamMb, vmHddGb);
     asb_default_disk_directory(pd, MAX_PATH);
     pos = append_wstr(buf, cap, pos, pd);
-    pos += sprintf_s(buf + pos, cap - pos, "}");
+    pos += sprintf_s(buf + pos, cap - pos, ",\"gpus\":[");
+    for (i = 0; gpus && i < gpus->count; i++) {
+        if (i) pos += sprintf_s(buf + pos, cap - pos, ",");
+        pos += sprintf_s(buf + pos, cap - pos, "{\"id\":");
+        pos = append_wstr(buf, cap, pos, gpus->gpus[i].interface_path);
+        pos += sprintf_s(buf + pos, cap - pos, ",\"name\":");
+        pos = append_wstr(buf, cap, pos, gpus->gpus[i].name);
+        pos += sprintf_s(buf + pos, cap - pos, ",\"location\":");
+        pos = append_wstr(buf, cap, pos, gpus->gpus[i].location);
+        pos += sprintf_s(buf + pos, cap - pos, "}");
+    }
+    pos += sprintf_s(buf + pos, cap - pos, "]}");
     return pos;
 }
 
@@ -472,6 +488,17 @@ static void trim_ws(wchar_t *s)
     while (n > 0 && (s[n-1]==L' '||s[n-1]==L'\t'||s[n-1]==L'\r'||s[n-1]==L'\n')) s[--n] = 0;
 }
 
+static const wchar_t *read_gpu_selection(const wchar_t *body, int *mode,
+                                         wchar_t *id, size_t id_cap)
+{
+    if (json_has_key(body, L"gpuId") &&
+        !json_get_string(body, L"gpuId", id, id_cap))
+        return id[0] ? L"gpuId is too long (maximum 511 characters)."
+                     : L"gpuId must be a valid JSON string without NUL characters.";
+    if (!json_get_int(body, L"gpuMode", mode) && id[0]) *mode = GPU_DEFAULT;
+    return asb_validate_gpu_selection(*mode, id);
+}
+
 static const char *validate_create(const wchar_t *name, const wchar_t *os,
                                    const wchar_t *tpl, const wchar_t *img,
                                    BOOL is_template, int ram_mb, int hdd_gb,
@@ -520,7 +547,7 @@ static const char *validate_create(const wchar_t *name, const wchar_t *os,
     }
     if (hdd_gb != 0 && hdd_gb < 1)       return "Disk size must be at least 1 GB.";
     if (cpu_cores != 0 && cpu_cores < 1) return "CPU cores must be at least 1.";
-    if (gpu_mode < 0 || gpu_mode > 2)    return "gpuMode must be 0 (None), 1 (Default), or 2 (Try all).";
+    if (gpu_mode < 0 || gpu_mode > 1)    return "gpuMode must be 0 (None) or 1 (Default GPU).";
     if (net_mode < 0 || net_mode > 3)    return "networkMode must be 0 (None), 1 (NAT), 2 (External), or 3 (Internal).";
 
     return NULL;
@@ -532,7 +559,7 @@ static int handle_request(PHTTP_REQUEST req)
 {
     const wchar_t *path = req->CookedUrl.pAbsPath ? req->CookedUrl.pAbsPath : L"/";
     HTTP_VERB verb = req->Verb;
-    char buf[32768];
+    static char buf[ASB_MAX_VMS * 16384];
     int pos, i;
 
     /* /v1/version is open; everything else requires the token. */
@@ -613,6 +640,7 @@ static int handle_request(PHTTP_REQUEST req)
             wchar_t name[256]={0}, os[32]={0}, img[MAX_PATH]={0}, tpl[256]={0};
             wchar_t user[128]={0}, pass[256]={0}, adapter[256]={0};
             wchar_t disk_directory[MAX_PATH + 1]={0};
+            wchar_t gpu_id[512]={0};
             char nu[256]={0};
             if (!body_to_wide(req, body, 8192)) {
                 send_err(req->RequestId, 400, "Bad Request", "invalid_arg",
@@ -660,10 +688,21 @@ static int handle_request(PHTTP_REQUEST req)
             cfg.template_name = tpl; cfg.username = user; cfg.password = pass;
             cfg.net_adapter = adapter;
             cfg.disk_directory = disk_directory;
+            cfg.gpu_id = gpu_id;
             if (json_get_int(body, L"ramMb", &iv)) cfg.ram_mb = (DWORD)iv;
             if (json_get_int(body, L"hddGb", &iv)) cfg.hdd_gb = (DWORD)iv;
             if (json_get_int(body, L"cpuCores", &iv)) cfg.cpu_cores = (DWORD)iv;
-            if (json_get_int(body, L"gpuMode", &iv)) cfg.gpu_mode = iv;
+            {
+                const wchar_t *verr = read_gpu_selection(body, &cfg.gpu_mode,
+                                                        gpu_id, ARRAYSIZE(gpu_id));
+                if (verr) {
+                    char message[512] = {0};
+                    WideCharToMultiByte(CP_UTF8, 0, verr, -1, message, sizeof(message), NULL, NULL);
+                    SecureZeroMemory(pass, sizeof(pass));
+                    send_err(req->RequestId, 400, "Bad Request", "invalid_arg", message);
+                    return 0;
+                }
+            }
             if (json_get_int(body, L"networkMode", &iv)) cfg.network_mode = iv;
             if (json_get_bool(body, L"testMode", &bv)) cfg.test_mode = bv;
             if (json_get_bool(body, L"sshEnabled", &bv)) cfg.ssh_enabled = bv;
@@ -763,7 +802,9 @@ static int handle_request(PHTTP_REQUEST req)
                 return 0;
             }
             if (verb == HttpVerbPUT) {   /* edit (PUT instead of PATCH: PATCH isn't in the http.sys verb enum) */
-                wchar_t body[2048]; int iv; HRESULT hr = S_OK;
+                wchar_t body[8192], gpu_id[512] = {0};
+                int iv, gpu_mode = GPU_DEFAULT; BOOL has_gpu;
+                HRESULT hr = S_OK;
                 /* config is locked while building or running -- return a clean 409,
                    not the generic 500 that asb_vm_set_*'s E_ACCESSDENIED would
                    produce. The GUI likewise disables the edit control while a VM is
@@ -777,7 +818,22 @@ static int handle_request(PHTTP_REQUEST req)
                     send_err(req->RequestId, 409, "Conflict", "vm_running", "cannot edit a running VM; stop it first");
                     return 0;
                 }
-                body_to_wide(req, body, 2048);
+                if (!body_to_wide(req, body, ARRAYSIZE(body))) {
+                    send_err(req->RequestId, 400, "Bad Request", "invalid_arg",
+                             "Request body must contain valid UTF-8 JSON without NUL bytes.");
+                    return 0;
+                }
+                has_gpu = json_has_key(body, L"gpuMode") || json_has_key(body, L"gpuId");
+                if (has_gpu) {
+                    const wchar_t *verr = read_gpu_selection(body, &gpu_mode,
+                                                            gpu_id, ARRAYSIZE(gpu_id));
+                    if (verr) {
+                        char message[512] = {0};
+                        WideCharToMultiByte(CP_UTF8, 0, verr, -1, message, sizeof(message), NULL, NULL);
+                        send_err(req->RequestId, 400, "Bad Request", "invalid_arg", message);
+                        return 0;
+                    }
+                }
                 /* name is the guest hostname -- fixed at create, NOT editable. */
                 if (json_get_int(body, L"ramMb", &iv)) {
                     if (iv < 512 || iv % 2 != 0) { send_err(req->RequestId, 400, "Bad Request", "invalid_arg", "RAM must be 2 MB-aligned and at least 512 MB"); return 0; }
@@ -787,9 +843,12 @@ static int handle_request(PHTTP_REQUEST req)
                     if (iv < 1) { send_err(req->RequestId, 400, "Bad Request", "invalid_arg", "CPU cores must be at least 1"); return 0; }
                     hr = asb_vm_set_cpu(vm, (DWORD)iv);
                 }
-                if (json_get_int(body, L"gpuMode", &iv)) {
-                    if (iv < 0 || iv > 2) { send_err(req->RequestId, 400, "Bad Request", "invalid_arg", "gpuMode must be 0 (None), 1 (Default), or 2 (Try all)"); return 0; }
-                    hr = asb_vm_set_gpu(vm, iv);
+                if (has_gpu) {
+                    hr = asb_vm_set_gpu_selection(vm, gpu_mode, gpu_id);
+                    if (FAILED(hr)) {
+                        send_hr(req->RequestId, "editVm", nu, hr);
+                        return 0;
+                    }
                 }
                 if (json_get_int(body, L"networkMode", &iv)) {
                     if (iv < 0 || iv > 3) { send_err(req->RequestId, 400, "Bad Request", "invalid_arg", "networkMode must be 0 (None), 1 (NAT), 2 (External), or 3 (Internal)"); return 0; }
