@@ -1,3 +1,4 @@
 EXPORTS
     nvapi_QueryInterface
     appsandbox_nvapi
+    appsandbox_nvidia_register_opencl_adapter

@@ -1,6 +1,7 @@
 #define COBJMACROS
 #include <windows.h>
 #include <string.h>
+#include "cuda_opencl_adapter_hooks.h"
 
 typedef void *(__cdecl *QueryInterfaceFn)(UINT id);
 
@@ -14,6 +15,7 @@ static QueryInterfaceFn g_query;
 #include <d3d12.h>
 #pragma warning(pop)
 
+#define NVAPI_GET_PHYSICAL_GPU_FROM_GPUID 0x5380ad1a
 #define NVAPI_OK 0
 #define NVAPI_NOT_SUPPORTED (-104)
 #define NVAPI_MAX_PHYSICAL_GPUS 64
@@ -192,6 +194,10 @@ void *__cdecl nvapi_QueryInterface(UINT id)
 
     InitOnceExecuteOnce(&g_once, load_nvapi, NULL, NULL);
     if (!g_query) return NULL;
+#if defined(_M_X64)
+    /* CUDA resolves this during initialization, before its DXGI comparisons. */
+    if (id == NVAPI_GET_PHYSICAL_GPU_FROM_GPUID) nvidia_install_cuda_adapter_hook();
+#endif
     original = g_query(id);
 #if defined(_M_X64)
     switch (id) {

@@ -136,6 +136,11 @@ static BOOL find_cuda_luid(const D3DKMT_ADAPTERADDRESS *address, LUID *luid)
     int count, matches = 0;
 
     if (!cuda) return FALSE;
+    if (GetProcAddress(cuda, "appsandbox_cuda")) {
+        FreeLibrary(cuda);
+        cuda = LoadLibraryExW(L"appsandbox-nvcuda.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!cuda) return FALSE;
+    }
     init = (CudaInitFn)GetProcAddress(cuda, "cuInit");
     get_count = (CudaDeviceCountFn)GetProcAddress(cuda, "cuDeviceGetCount");
     get_device = (CudaDeviceGetFn)GetProcAddress(cuda, "cuDeviceGet");

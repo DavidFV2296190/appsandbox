@@ -20,13 +20,14 @@
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
-    <ProjectGuid>{B689C521-58F9-47E4-92FC-E110A39D51C8}</ProjectGuid>
-    <RootNamespace>nvidia_dlss</RootNamespace>
+    <ProjectGuid>{AD44F837-587B-4C5D-8428-5DB42E36B8B0}</ProjectGuid>
+    <RootNamespace>nvidia_opencl</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration">
-    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <ConfigurationType Condition="'$(Platform)'=='x64'">DynamicLibrary</ConfigurationType>
+    <ConfigurationType Condition="'$(Platform)'=='ARM64'">Utility</ConfigurationType>
     <PlatformToolset>v143</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
@@ -40,16 +41,16 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
     <SolutionDir Condition="'$(SolutionDir)'=='' Or '$(SolutionDir)'=='*Undefined*'">$(MSBuildThisFileDirectory)..\..\</SolutionDir>
-    <TargetName>appsandbox-nvidia-dlss-shim</TargetName>
+    <TargetName>appsandbox-nvidia-opencl-shim</TargetName>
     <DisableFastUpToDateCheck>true</DisableFastUpToDateCheck>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Platform)'=='x64'">
     <OutDir>$(SolutionDir)bin\$(Configuration)\nvidia\</OutDir>
-    <IntDir>$(SolutionDir)obj\nvidia-dlss\$(Configuration)\</IntDir>
+    <IntDir>$(SolutionDir)obj\nvidia-opencl\$(Configuration)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Platform)'=='ARM64'">
     <OutDir>$(SolutionDir)bin\$(Configuration)-ARM64\nvidia\</OutDir>
-    <IntDir>$(SolutionDir)obj\nvidia-dlss\$(Configuration)-ARM64\</IntDir>
+    <IntDir>$(SolutionDir)obj\nvidia-opencl\$(Configuration)-ARM64\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
@@ -62,8 +63,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <ModuleDefinitionFile>nvapi_exports.def</ModuleDefinitionFile>
-      <AdditionalDependencies>dxgi.lib;dxguid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(IntDir)$(TargetName).exp;dxgi.lib;dxguid.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
@@ -86,19 +86,19 @@
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
   </ItemDefinitionGroup>
-  <ItemGroup>
-    <ClCompile Include="nvapi_shim.c" />
-    <ClCompile Include="cuda_opencl_adapter_hooks.c" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="cuda_opencl_adapter_hooks.h" />
-    <None Include="nvapi_exports.def" />
+  <ItemGroup Condition="'$(Platform)'=='x64'">
+    <ClCompile Include="opencl_shim.c" />
+    <CustomBuild Include="opencl_exports.def">
+      <Command>lib.exe /NOLOGO /DEF:"%(FullPath)" /MACHINE:X64 /OUT:"$(IntDir)$(TargetName).lib"</Command>
+      <Outputs>$(IntDir)$(TargetName).lib;$(IntDir)$(TargetName).exp</Outputs>
+      <LinkObjects>false</LinkObjects>
+    </CustomBuild>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <Target Name="StageNvapiRuntime" AfterTargets="Build" Condition="'$(Platform)'=='x64'">
+  <Target Name="StageOpenclRuntime" AfterTargets="Build" Condition="'$(Platform)'=='x64'">
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(OutDir)..\resources\nvidia\" SkipUnchangedFiles="true" />
   </Target>
-  <Target Name="CleanNvapiRuntime" AfterTargets="Clean" Condition="'$(Platform)'=='x64'">
+  <Target Name="CleanOpenclRuntime" AfterTargets="Clean" Condition="'$(Platform)'=='x64'">
     <Delete Files="$(OutDir)..\resources\nvidia\$(TargetFileName)" />
   </Target>
 </Project>
