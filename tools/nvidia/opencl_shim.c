@@ -2,12 +2,7 @@
 #include <windows.h>
 #include <stddef.h>
 #include <string.h>
-#pragma warning(push)
-#pragma warning(disable: 4201)
-#include <dxgi.h>
-#include <winternl.h>
-#include <d3dkmthk.h>
-#pragma warning(pop)
+#include "adapter_identity.h"
 
 #define CL_SUCCESS 0
 #define CL_INVALID_VALUE (-30)
@@ -63,44 +58,10 @@ static ExtensionFn g_extension;
 static PlatformFunctionFn g_platform_function;
 static PlatformDispatchFn g_platform_dispatch;
 static ClAdapter *g_adapters;
-static PFND3DKMT_OPENADAPTERFROMLUID g_open_luid;
-static PFND3DKMT_QUERYADAPTERINFO g_query_adapter;
-static PFND3DKMT_CLOSEADAPTER g_close_adapter;
 
 int WINAPI clIcdGetPlatformIDsKHR(UINT count, ClPlatform *platforms, UINT *total);
 void *WINAPI clGetExtensionFunctionAddress(const char *name);
 void *WINAPI clIcdGetFunctionAddressForPlatformKHR(ClPlatform platform, const char *name);
-
-static BOOL query_adapter(D3DKMT_HANDLE adapter, KMTQUERYADAPTERINFOTYPE type,
-                          void *data, UINT size)
-{
-    D3DKMT_QUERYADAPTERINFO query = {0};
-    query.hAdapter = adapter;
-    query.Type = type;
-    query.pPrivateDriverData = data;
-    query.PrivateDriverDataSize = size;
-    return g_query_adapter(&query) >= 0;
-}
-
-static BOOL adapter_address(const DXGI_ADAPTER_DESC1 *desc, D3DKMT_ADAPTERADDRESS *address)
-{
-    D3DKMT_OPENADAPTERFROMLUID open = {0};
-    D3DKMT_CLOSEADAPTER close = {0};
-    D3DKMT_ADAPTERTYPE type = {0};
-    D3DKMT_QUERY_DEVICE_IDS ids = {0};
-    BOOL found;
-
-    open.AdapterLuid = desc->AdapterLuid;
-    if (g_open_luid(&open) < 0) return FALSE;
-    found = query_adapter(open.hAdapter, KMTQAITYPE_ADAPTERTYPE_RENDER, &type, sizeof(type)) &&
-        type.Paravirtualized &&
-        query_adapter(open.hAdapter, KMTQAITYPE_PHYSICALADAPTERDEVICEIDS, &ids, sizeof(ids)) &&
-        ids.DeviceIds.VendorID == 0x10de && ids.DeviceIds.DeviceID == desc->DeviceId &&
-        query_adapter(open.hAdapter, KMTQAITYPE_ADAPTERADDRESS_RENDER, address, sizeof(*address));
-    close.hAdapter = open.hAdapter;
-    g_close_adapter(&close);
-    return found;
-}
 
 static int WINAPI device_info_hook(ClDevice device, UINT name, size_t capacity,
                                    void *value, size_t *size)
@@ -191,7 +152,8 @@ done:
 
 static void map_adapters(void)
 {
-    HMODULE gdi = LoadLibraryExW(L"gdi32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    NvidiaAdapterApi api = {0};
+    BOOL have_adapter_api = nvidia_adapter_api_load(&api);
     HMODULE nvapi = LoadLibraryExW(L"nvapi64.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
     IDXGIFactory1 *factory = NULL;
     RegisterAdapterFn register_adapter = nvapi ?
@@ -199,43 +161,34 @@ static void map_adapters(void)
     ClAdapter *entry;
     UINT i;
 
-    if (!gdi) goto done;
-    g_open_luid = (PFND3DKMT_OPENADAPTERFROMLUID)GetProcAddress(gdi, "D3DKMTOpenAdapterFromLuid");
-    g_query_adapter = (PFND3DKMT_QUERYADAPTERINFO)GetProcAddress(gdi, "D3DKMTQueryAdapterInfo");
-    g_close_adapter = (PFND3DKMT_CLOSEADAPTER)GetProcAddress(gdi, "D3DKMTCloseAdapter");
-    if (!g_open_luid || !g_query_adapter || !g_close_adapter ||
+    if (!have_adapter_api ||
         FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&factory))) goto done;
-    for (i = 0; ; ++i) {
+    for (i = 0; ;) {
         IDXGIAdapter1 *adapter = NULL;
-        DXGI_ADAPTER_DESC1 desc;
-        D3DKMT_ADAPTERADDRESS address;
+        NvidiaAdapterIdentity identity;
         ClAdapter *match = NULL;
         UINT matches = 0;
 
-        if (IDXGIFactory1_EnumAdapters1(factory, i, &adapter) != S_OK) break;
-        if (FAILED(IDXGIAdapter1_GetDesc1(adapter, &desc)) || desc.VendorId != 0x10de ||
-            !adapter_address(&desc, &address)) {
-            IDXGIAdapter1_Release(adapter);
-            continue;
-        }
+        if (nvidia_enum_guest_adapter(&api, factory, &i, &adapter, &identity) != S_OK) break;
         IDXGIAdapter1_Release(adapter);
         for (entry = g_adapters; entry; entry = entry->next) {
-            if (entry->pci.bus == address.BusNumber && entry->pci.device == address.DeviceNumber &&
-                entry->pci.function == address.FunctionNumber) {
+            if (entry->pci.bus == identity.address.BusNumber &&
+                entry->pci.device == identity.address.DeviceNumber &&
+                entry->pci.function == identity.address.FunctionNumber) {
                 match = entry;
                 ++matches;
             }
         }
         if (matches != 1) continue;
         if (!match->mapped) {
-            match->guest_luid = desc.AdapterLuid;
+            match->guest_luid = identity.luid;
             match->mapped = TRUE;
         }
-        if (register_adapter) register_adapter(g_driver, &desc.AdapterLuid, &match->host_luid);
+        if (register_adapter) register_adapter(g_driver, &identity.luid, &match->host_luid);
     }
 done:
     if (factory) IDXGIFactory1_Release(factory);
-    if (gdi) FreeLibrary(gdi);
+    if (api.module) FreeLibrary(api.module);
     if (nvapi) FreeLibrary(nvapi);
 }
 

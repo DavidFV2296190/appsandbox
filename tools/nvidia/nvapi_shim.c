@@ -9,9 +9,9 @@ static INIT_ONCE g_once = INIT_ONCE_STATIC_INIT;
 static QueryInterfaceFn g_query;
 
 #if defined(_M_X64)
+#include "adapter_identity.h"
 #pragma warning(push)
 #pragma warning(disable: 4201)
-#include <dxgi.h>
 #include <d3d12.h>
 #pragma warning(pop)
 
@@ -52,16 +52,12 @@ static BOOL find_nvidia_adapter(const LUID *wanted, LUID *luid)
     UINT i;
 
     if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&factory))) return FALSE;
-    for (i = 0; !found; i++) {
+    for (i = 0; !found;) {
         IDXGIAdapter1 *adapter = NULL;
         DXGI_ADAPTER_DESC1 desc;
-        HRESULT result;
 
-        if (IDXGIFactory1_EnumAdapters1(factory, i, &adapter) != S_OK) break;
-        result = IDXGIAdapter1_GetDesc1(adapter, &desc);
+        if (nvidia_enum_dxgi_adapter(factory, &i, &adapter, &desc) != S_OK) break;
         IDXGIAdapter1_Release(adapter);
-        if (FAILED(result) || desc.VendorId != 0x10de ||
-            (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) continue;
         if (wanted && (wanted->LowPart != desc.AdapterLuid.LowPart ||
                        wanted->HighPart != desc.AdapterLuid.HighPart)) continue;
         if (luid) *luid = desc.AdapterLuid;

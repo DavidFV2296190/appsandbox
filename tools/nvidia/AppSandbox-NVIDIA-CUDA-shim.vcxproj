@@ -25,18 +25,9 @@
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-  <PropertyGroup Label="Configuration">
-    <ConfigurationType>DynamicLibrary</ConfigurationType>
-    <ConfigurationType Condition="'$(Platform)'=='ARM64'">Utility</ConfigurationType>
-    <PlatformToolset>v143</PlatformToolset>
-    <CharacterSet>Unicode</CharacterSet>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
-    <UseDebugLibraries>true</UseDebugLibraries>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)'=='Release'" Label="Configuration">
-    <UseDebugLibraries>false</UseDebugLibraries>
-    <WholeProgramOptimization>true</WholeProgramOptimization>
+  <Import Project="nvidia-shim.props" />
+  <PropertyGroup Condition="'$(Platform)'=='ARM64'" Label="Configuration">
+    <ConfigurationType>Utility</ConfigurationType>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
@@ -53,54 +44,21 @@
     <IntDir>$(SolutionDir)obj\nvidia-cuda\$(Configuration)-ARM64\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
-    <ClCompile>
-      <WarningLevel>Level4</WarningLevel>
-      <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <SDLCheck>true</SDLCheck>
-      <ConformanceMode>true</ConformanceMode>
-      <CompileAs>CompileAsC</CompileAs>
-    </ClCompile>
     <Link>
-      <SubSystem>Windows</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>$(IntDir)$(TargetName).exp;dxgi.lib;dxguid.lib;%(AdditionalDependencies)</AdditionalDependencies>
-    </Link>
-  </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
-    <ClCompile>
-      <Optimization>Disabled</Optimization>
-      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-    </ClCompile>
-  </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
-    <ClCompile>
-      <Optimization>MaxSpeed</Optimization>
-      <FunctionLevelLinking>true</FunctionLevelLinking>
-      <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
-    </ClCompile>
-    <Link>
-      <EnableCOMDATFolding>true</EnableCOMDATFolding>
-      <OptimizeReferences>true</OptimizeReferences>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup Condition="'$(Platform)'=='x64'">
     <ClCompile Include="cuda_shim.c" />
+    <ClCompile Include="adapter_identity.c" />
   </ItemGroup>
   <ItemGroup Condition="'$(Platform)'=='x64'">
+    <ClInclude Include="adapter_identity.h" />
     <CustomBuild Include="cuda_exports.def">
       <Command>lib.exe /NOLOGO /DEF:"%(FullPath)" /MACHINE:$(Platform) /OUT:"$(IntDir)$(TargetName).lib"</Command>
       <Outputs>$(IntDir)$(TargetName).lib;$(IntDir)$(TargetName).exp</Outputs>
       <LinkObjects>false</LinkObjects>
     </CustomBuild>
   </ItemGroup>
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <Target Name="StageCudaRuntime" AfterTargets="Build" Condition="'$(Platform)'=='x64'">
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(OutDir)..\resources\nvidia\" SkipUnchangedFiles="true" />
-  </Target>
-  <Target Name="CleanCudaRuntime" AfterTargets="Clean" Condition="'$(Platform)'=='x64'">
-    <Delete Files="$(OutDir)..\resources\nvidia\$(TargetFileName)" />
-  </Target>
+  <Import Project="nvidia-shim.targets" />
 </Project>
